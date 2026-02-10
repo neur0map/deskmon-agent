@@ -9,6 +9,39 @@ Designed to work with [Deskmon](https://deskmon.dev) for macOS, but the API is o
 
 ---
 
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Your Mac                            │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │         Deskmon macOS App (SwiftUI)               │ │
+│  │                                                   │ │
+│  │  Pure client - no backend process on your Mac.   │ │
+│  │  Just polls agents and renders the data.         │ │
+│  └───────────────────────────────────────────────────┘ │
+└───────────────────────┬─────────────────────────────────┘
+                        │ HTTP GET /stats
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│                   Your Server                           │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │         deskmon-agent (this project)              │ │
+│  │                                                   │ │
+│  │  - Collects CPU, RAM, disk, network stats        │ │
+│  │  - Queries Docker for container metrics          │ │
+│  │  - Queries app APIs (Pihole, Plex, etc.)         │ │
+│  │  - Serves everything as JSON on port 7654        │ │
+│  │                                                   │ │
+│  │  THIS IS THE BACKEND. No cloud. No relay.        │ │
+│  └───────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+```
+
+The agent **is** the backend. The macOS app is a pure SwiftUI client that makes HTTP requests directly to your agent(s) over your local network.
+
+---
+
 ## Features
 
 - **Lightweight**: Single static binary, minimal resource usage
