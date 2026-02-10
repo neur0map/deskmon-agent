@@ -90,12 +90,12 @@ func (s *Server) Start() error {
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Bind, s.cfg.Port)
 	s.httpSrv = &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 13, // 8KB
+		Addr:           addr,
+		Handler:        handler,
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   0, // Disabled — SSE requires long-lived connections. Regular endpoints complete in <100ms.
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 13, // 8KB
 	}
 
 	s.startRateCleanup()

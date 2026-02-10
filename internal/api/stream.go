@@ -20,9 +20,11 @@ func (s *Server) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	log.Printf("SSE stream opened from %s", ip)
 
-	// Disable the server's WriteTimeout for this long-lived connection
+	// Ensure no write deadline for this long-lived connection
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Time{})
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("SSE: SetWriteDeadline failed (non-fatal): %v", err)
+	}
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
