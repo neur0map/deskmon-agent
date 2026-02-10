@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -56,29 +57,34 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 		return []ContainerStats{}
 	}
 
-	results := make([]ContainerStats, 0, len(containers))
+	results := make([]ContainerStats, len(containers))
 
-	for _, c := range containers {
-		cs := ContainerStats{
+	var wg sync.WaitGroup
+	for i, c := range containers {
+		results[i] = ContainerStats{
 			ID:     c.ID[:12],
 			Name:   cleanContainerName(c.Names),
 			Image:  c.Image,
 			Status: normalizeStatus(c.State),
 		}
 
-		// Only fetch resource stats for running containers
-		if c.State == "running" {
-			dc.fillRunningStats(ctx, cli, c.ID, &cs)
-		}
+		wg.Add(1)
+		go func(idx int, ctr container.Summary) {
+			defer wg.Done()
 
-		// Get started time from container inspect
-		info, err := cli.ContainerInspect(ctx, c.ID)
-		if err == nil && info.State != nil {
-			cs.StartedAt = info.State.StartedAt
-		}
+			// Fetch resource stats for running containers
+			if ctr.State == "running" {
+				dc.fillRunningStats(ctx, cli, ctr.ID, &results[idx])
+			}
 
-		results = append(results, cs)
+			// Get started time from container inspect
+			info, inspectErr := cli.ContainerInspect(ctx, ctr.ID)
+			if inspectErr == nil && info.State != nil {
+				results[idx].StartedAt = info.State.StartedAt
+			}
+		}(i, c)
 	}
+	wg.Wait()
 
 	return results
 }
