@@ -1,11 +1,12 @@
 # deskmon-agent
 
-Lightweight system monitoring agent for Linux servers. Collects system stats and exposes them via a simple HTTP API.
+Lightweight system monitoring agent for Linux servers. Collects system and Docker stats, exposes them via HTTP API, and is controllable from the Deskmon macOS app.
 
-Designed to work with [Deskmon](https://deskmon.dev) for macOS, but the API is open and can be used with any client.
+Single binary. One-command install. Set it and forget it.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
+![Go](https://img.shields.io/badge/Go-1.21+-00ADD8)
 
 ---
 
@@ -14,249 +15,288 @@ Designed to work with [Deskmon](https://deskmon.dev) for macOS, but the API is o
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     Your Mac                            │
-│  ┌───────────────────────────────────────────────────┐ │
-│  │         Deskmon macOS App (SwiftUI)               │ │
-│  │                                                   │ │
-│  │  Pure client - no backend process on your Mac.   │ │
-│  │  Just polls agents and renders the data.         │ │
-│  └───────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │         Deskmon macOS App (SwiftUI)               │  │
+│  │                                                   │  │
+│  │  Polls agents at your configured interval (3s).   │  │
+│  │  Renders CPU, RAM, disk, network, containers.     │  │
+│  │  Controls agent: restart, stop.                   │  │
+│  └───────────────────────────────────────────────────┘  │
 └───────────────────────┬─────────────────────────────────┘
-                        │ HTTP GET /stats
+                        │ HTTP (Bearer token auth)
                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│                   Your Server                           │
-│  ┌───────────────────────────────────────────────────┐ │
-│  │         deskmon-agent (this project)              │ │
-│  │                                                   │ │
-│  │  - Collects CPU, RAM, disk, network stats        │ │
-│  │  - Queries Docker for container metrics          │ │
-│  │  - Queries app APIs (Pihole, Plex, etc.)         │ │
-│  │  - Serves everything as JSON on port 7654        │ │
-│  │                                                   │ │
-│  │  THIS IS THE BACKEND. No cloud. No relay.        │ │
-│  └───────────────────────────────────────────────────┘ │
+│                   Your Linux Server                     │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │         deskmon-agent (this project)              │  │
+│  │                                                   │  │
+│  │  Reads /proc and /sys for system metrics          │  │
+│  │  Queries Docker socket for container stats        │  │
+│  │  Serves JSON on a single port (default 7654)      │  │
+│  │  Managed by systemd — auto-start, auto-recover    │  │
+│  │                                                   │  │
+│  │  No cloud. No relay. Direct connection.           │  │
+│  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
-
-The agent **is** the backend. The macOS app is a pure SwiftUI client that makes HTTP requests directly to your agent(s) over your local network.
-
----
-
-## Features
-
-- **Lightweight**: Single static binary, minimal resource usage
-- **Zero config**: Works out of the box with sensible defaults
-- **Simple API**: JSON over HTTP, easy to integrate
-- **Docker stats**: Monitor container CPU, memory, and status
-- **Extensible**: Plugin system for app integrations (Pihole, Plex, etc.)
 
 ---
 
 ## Quick Start
 
+### Prerequisites
+
+- Linux server (Ubuntu, Debian, Fedora, etc.)
+- Go 1.21+ installed (`sudo apt install golang-go`)
+- Git installed
+
 ### Install
 
 ```bash
-curl -fsSL https://deskmon.dev/install.sh | bash
+git clone https://github.com/neur0map/deskmon-agent.git
+cd deskmon-agent
+sudo make setup
 ```
 
-Or download from [releases](https://github.com/neur0map/deskmon-agent/releases).
+That's it. One command builds the binary, installs it, generates an auth token, creates a systemd service, and starts the agent.
 
-### Run
+**Custom port:**
 
 ```bash
-# Run in foreground
-deskmon-agent
-
-# Run as systemd service
-sudo systemctl enable --now deskmon-agent
+sudo make setup PORT=9090
 ```
 
-### Verify
+**Expected output:**
+
+```
+Detected: Linux x86_64 (amd64)
+Building deskmon-agent v0.1.0...
+Build complete: bin/deskmon-agent
+
+Installing deskmon-agent...
+  Binary: bin/deskmon-agent
+  Installed binary to /usr/local/bin/deskmon-agent
+  Config written to /etc/deskmon/config.yaml
+  Service file created
+  Service enabled and started
+
+===========================================
+  deskmon-agent installed successfully
+===========================================
+
+  Port:       7654
+  Auth Token: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+  Config:     /etc/deskmon/config.yaml
+  Service:    deskmon-agent
+
+  Add this server to your Deskmon macOS app:
+    Address: 192.168.1.100:7654
+    Token:   a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+
+  Useful commands:
+    systemctl status deskmon-agent
+    journalctl -u deskmon-agent -f
+
+  Firewall reminder:
+    sudo ufw allow 7654/tcp
+===========================================
+```
+
+### Connect from macOS App
+
+1. Open Deskmon on your Mac
+2. Go to **Settings** > **+ Add Server**
+3. Enter the server address and port (e.g. `192.168.1.100:7654`)
+4. Enter the auth token printed during install
+5. Green dot = connected
+
+### Verify Manually
 
 ```bash
+# Health check (no auth required)
 curl http://localhost:7654/health
-# {"status":"ok","version":"0.1.0"}
 
-curl http://localhost:7654/stats
-# Full system stats JSON
+# Full stats (auth required)
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:7654/stats
 ```
+
+---
+
+## What You Get
+
+Once running, the macOS app shows live stats for each server:
+
+- **CPU** — Usage %, core count, temperature
+- **Memory** — Used / total RAM
+- **Disk** — Used / total on root mount
+- **Network** — Download/upload speed (bytes/sec)
+- **Uptime** — Time since last boot
+- **Docker containers** — Per-container CPU, memory, network, block I/O, PIDs, status
+
+The agent's background sampler ticks every 1 second, so data is always fresh regardless of your polling interval.
 
 ---
 
 ## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Health check, returns version |
-| `GET /stats` | All available stats |
-| `GET /stats/system` | CPU, memory, disk, network, load |
-| `GET /stats/docker` | Container list with stats |
-| `GET /stats/integrations` | App-specific stats (if configured) |
+All endpoints except `/health` require `Authorization: Bearer <token>`.
 
-### Example Response: `/stats`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | `{"status": "ok"}` — online detection |
+| `GET` | `/stats` | Full system + Docker container stats |
+| `GET` | `/stats/system` | System stats only (no Docker overhead) |
+| `GET` | `/stats/docker` | Docker container stats only |
+| `POST` | `/agent/restart` | Restart agent via systemd |
+| `POST` | `/agent/stop` | Stop agent via systemd |
+| `GET` | `/agent/status` | Agent version and service state |
 
-```json
-{
-  "hostname": "homeserver",
-  "uptime": 1234567,
-  "cpu": {
-    "usage": 23.5,
-    "cores": 4,
-    "load": [1.2, 0.8, 0.6]
-  },
-  "memory": {
-    "used": 4294967296,
-    "total": 17179869184,
-    "swap_used": 0,
-    "swap_total": 8589934592
-  },
-  "disks": [
-    {
-      "mount": "/",
-      "used": 128849018880,
-      "total": 512110190592,
-      "read_bytes": 1234567,
-      "write_bytes": 7654321
-    }
-  ],
-  "network": {
-    "rx_bytes": 12345678900,
-    "tx_bytes": 9876543210,
-    "rx_rate": 1234567,
-    "tx_rate": 456789
-  },
-  "temperature": {
-    "cpu": 45.0
-  },
-  "containers": [
-    {
-      "id": "abc123",
-      "name": "pihole",
-      "image": "pihole/pihole:latest",
-      "status": "running",
-      "cpu": 0.5,
-      "memory": 134217728,
-      "ports": ["53/tcp", "80/tcp"]
-    }
-  ]
-}
-```
+See [agent-api-contract.md](agent-api-contract.md) for the full JSON schema and field reference.
 
 ---
 
 ## Configuration
 
-Configuration is optional. Create `/etc/deskmon/config.yaml` to customize:
+Config is auto-generated during install at `/etc/deskmon/config.yaml`:
 
 ```yaml
-# Server settings
 port: 7654
-bind: "0.0.0.0"
+auth_token: "your-generated-token"
+```
 
-# Optional auth token (recommended for non-local access)
-auth_token: "your-secret-token"
+To change settings, edit the file and restart:
 
-# Docker socket path (auto-detected if not set)
-docker_socket: "/var/run/docker.sock"
+```bash
+sudo nano /etc/deskmon/config.yaml
+sudo systemctl restart deskmon-agent
+```
 
-# Integrations
-integrations:
-  pihole:
-    enabled: true
-    url: "http://localhost:80"
-    api_key: "your-pihole-api-key"
-  
-  plex:
-    enabled: false
-    url: "http://localhost:32400"
-    token: "your-plex-token"
+Or restart from the macOS app's Settings panel.
+
+---
+
+## Day-to-Day Operations
+
+### Upgrades
+
+```bash
+cd deskmon-agent
+git pull
+sudo make setup
+```
+
+Rebuilds the binary, replaces it, restarts the service. Your existing config and auth token are preserved.
+
+### Uninstall
+
+```bash
+sudo make uninstall
+```
+
+Stops the service, removes the binary, config, and systemd unit file.
+
+### Useful Commands
+
+```bash
+# Check agent status
+systemctl status deskmon-agent
+
+# View logs
+journalctl -u deskmon-agent -f
+
+# Restart manually
+sudo systemctl restart deskmon-agent
 ```
 
 ---
 
-## Integrations
+## Agent Control from macOS
 
-### Pihole
+The macOS app can control the agent remotely:
 
-```yaml
-integrations:
-  pihole:
-    enabled: true
-    url: "http://localhost:80"
-    api_key: "your-api-key"  # From Pihole admin > Settings > API
-```
+- **Restart Agent** — Sends `POST /agent/restart`. Agent restarts via systemd (~5 seconds). You'll see a brief offline status, then it comes back.
+- **Polling toggle** — Turns HTTP polling on/off from the app side. Agent keeps running either way.
+- **Refresh interval** — Controls how often the app hits `/stats` (e.g. 3s, 5s, 10s).
 
-Returns:
-```json
-{
-  "pihole": {
-    "status": "enabled",
-    "queries_today": 45621,
-    "blocked_today": 12453,
-    "block_percent": 27.3,
-    "gravity_size": 892341
-  }
-}
-```
-
-### Plex (coming soon)
-
-### Jellyfin (coming soon)
-
-### Home Assistant (coming soon)
+The agent auto-recovers from crashes (systemd `Restart=always`) and starts automatically on server reboot.
 
 ---
 
 ## Security
 
-By default, deskmon-agent binds to all interfaces (`0.0.0.0`). For security:
+The agent is hardened as a read-only stats reporter:
 
-1. **Firewall**: Only allow access from your LAN or specific IPs
-2. **Auth token**: Set `auth_token` in config, pass via `Authorization: Bearer <token>` header
-3. **Bind locally**: Set `bind: "127.0.0.1"` and use SSH tunnel or VPN
+- **Auth token** — Auto-generated 32-char token, constant-time comparison to prevent timing attacks
+- **Rate limiting** — 60 requests/minute per IP to prevent brute-force
+- **No injection surface** — Zero user input reaches shell commands, file paths, or system calls. Control endpoints execute hardcoded `systemctl` commands only.
+- **Read-only** — Only reads from `/proc`, `/sys`, and Docker socket. No filesystem writes. Docker client is read-only (list and stats only).
+- **No outbound connections** — No phoning home, no telemetry, no update checks
+- **Systemd sandboxing** — `ProtectSystem=strict`, `ReadOnlyPaths=/`, `ProtectHome=yes`, `NoNewPrivileges=yes`
+- **Config permissions** — `/etc/deskmon/` is root-only (0700), config file is 0600
+
+### Firewall
+
+Open only the agent port:
+
+```bash
+sudo ufw allow 7654/tcp
+```
+
+For extra security, restrict to your Mac's IP:
+
+```bash
+sudo ufw allow from 192.168.1.50 to any port 7654
+```
 
 ---
 
-## Building from Source
+## Cross-Compile (Alternative Deployment)
+
+If you prefer not to install Go on the server, build on your Mac and copy the package:
 
 ```bash
-git clone https://github.com/neur0map/deskmon-agent.git
+# On your Mac
+make package-amd64    # x86_64 servers
+make package-arm64    # ARM servers
+
+# Copy to server
+scp dist/deskmon-agent-0.1.0-linux-amd64.tar.gz user@server:~/
+
+# On the server
+tar xzf deskmon-agent-0.1.0-linux-amd64.tar.gz
 cd deskmon-agent
-make build
-
-# Cross-compile for Linux
-make build-linux-amd64
-make build-linux-arm64
+sudo ./install.sh
+sudo ./install.sh --port 9090    # custom port
 ```
-
-Requirements: Go 1.21+
 
 ---
 
-## Systemd Service
+## Project Structure
 
-The install script creates this automatically, but for manual setup:
-
-```ini
-# /etc/systemd/system/deskmon-agent.service
-[Unit]
-Description=Deskmon Agent
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/deskmon-agent
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
 ```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now deskmon-agent
+deskmon-agent/
+├── cmd/deskmon-agent/
+│   └── main.go              # Entry point, graceful shutdown
+├── internal/
+│   ├── api/
+│   │   ├── server.go        # HTTP server, auth, rate limiting
+│   │   ├── handlers.go      # /health, /stats handlers
+│   │   ├── control.go       # /agent/* control handlers
+│   │   └── server_test.go   # API tests
+│   ├── collector/
+│   │   ├── system.go        # CPU, memory, disk, network, temp, uptime
+│   │   └── docker.go        # Container stats via Docker SDK
+│   ├── config/
+│   │   ├── config.go        # YAML config loader
+│   │   └── config_test.go   # Config tests
+│   └── systemctl/
+│       └── systemctl.go     # Hardcoded systemctl commands
+├── scripts/
+│   └── install.sh           # Server install/uninstall script
+├── docs/plans/              # Design documents
+├── Makefile                 # Build, setup, package, test
+├── agent-api-contract.md    # API contract (source of truth)
+└── README.md
 ```
 
 ---
@@ -264,26 +304,47 @@ sudo systemctl enable --now deskmon-agent
 ## Troubleshooting
 
 **Agent not starting**
-- Check logs: `journalctl -u deskmon-agent -f`
-- Verify port not in use: `ss -tlnp | grep 7654`
+```bash
+journalctl -u deskmon-agent -f
+```
 
-**Docker stats not showing**
-- Ensure user is in docker group: `sudo usermod -aG docker $USER`
-- Or run agent as root (not recommended)
+**Port already in use**
+```bash
+ss -tlnp | grep 7654
+```
 
-**Permission denied on /sys files**
-- Some temperature sensors require root access
-- Agent will skip unavailable metrics gracefully
+**Docker containers not showing**
+- Agent runs as root, so Docker socket access should work
+- Check Docker is running: `systemctl status docker`
+- If no Docker installed, `containers` will be an empty array (not an error)
+
+**Temperature showing 0**
+- Some VMs and cloud servers don't expose thermal zones
+- Agent returns `0` gracefully per the API contract
+
+**Forgot auth token**
+```bash
+sudo cat /etc/deskmon/config.yaml
+```
+
+---
+
+## Makefile Reference
+
+| Target | Description |
+|--------|-------------|
+| `sudo make setup` | Build + install + start (on Linux server) |
+| `sudo make setup PORT=9090` | Same, with custom port |
+| `sudo make uninstall` | Remove everything |
+| `make build` | Build for current OS |
+| `make build-all` | Cross-compile both Linux architectures |
+| `make package-amd64` | Package for Linux x86_64 |
+| `make package-arm64` | Package for Linux ARM64 |
+| `make test` | Run tests |
+| `make clean` | Remove build artifacts |
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-## Related
-
-- [Deskmon](https://deskmon.dev) - macOS menu bar app (closed source)
-- [Deskmon Documentation](https://docs.deskmon.dev) - Full documentation
+MIT License — see [LICENSE](LICENSE) for details.
