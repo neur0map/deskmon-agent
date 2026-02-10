@@ -10,6 +10,7 @@ import (
 
 	"github.com/neur0map/deskmon-agent/internal/api"
 	"github.com/neur0map/deskmon-agent/internal/collector"
+	"github.com/neur0map/deskmon-agent/internal/collector/services"
 	"github.com/neur0map/deskmon-agent/internal/config"
 )
 
@@ -44,10 +45,15 @@ func main() {
 
 	dockerCollector := collector.NewDockerCollector(config.DefaultDockerSock)
 
+	// Initialize service detector (auto-discovers Pi-hole, Traefik, etc.)
+	svcDetector := services.NewServiceDetector(config.DefaultDockerSock)
+	svcDetector.Start()
+	defer svcDetector.Stop()
+
 	log.Printf("listening on %s:%d", cfg.Bind, cfg.Port)
 
 	// Start HTTP server
-	srv := api.NewServer(cfg, systemCollector, dockerCollector, Version)
+	srv := api.NewServer(cfg, systemCollector, dockerCollector, svcDetector, Version)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)

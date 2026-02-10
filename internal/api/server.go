@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/neur0map/deskmon-agent/internal/collector"
+	"github.com/neur0map/deskmon-agent/internal/collector/services"
 	"github.com/neur0map/deskmon-agent/internal/config"
 )
 
@@ -19,6 +20,7 @@ type Server struct {
 	cfg          *config.Config
 	system       *collector.SystemCollector
 	docker       *collector.DockerCollector
+	services     *services.ServiceDetector
 	version      string
 	httpSrv      *http.Server
 	dockerSocket string
@@ -38,11 +40,12 @@ const (
 	maxBodySize  = 1024 // 1KB
 )
 
-func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, version string) *Server {
+func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, svcDetector *services.ServiceDetector, version string) *Server {
 	return &Server{
 		cfg:          cfg,
 		system:       system,
 		docker:       docker,
+		services:     svcDetector,
 		version:      version,
 		dockerSocket: config.DefaultDockerSock,
 		rateMap:      make(map[string]*rateBucket),
@@ -61,6 +64,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /stats/system", s.authMiddleware(s.handleSystemStats))
 	mux.HandleFunc("GET /stats/docker", s.authMiddleware(s.handleDockerStats))
 	mux.HandleFunc("GET /stats/processes", s.authMiddleware(s.handleProcessStats))
+	mux.HandleFunc("GET /stats/services", s.authMiddleware(s.handleServiceStats))
 
 	// Agent control endpoints
 	mux.HandleFunc("POST /agent/restart", s.authMiddleware(s.handleAgentRestart))
