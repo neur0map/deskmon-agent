@@ -47,10 +47,10 @@ type StatItem struct {
 
 // ContainerInfo is a lightweight container record used during detection.
 type ContainerInfo struct {
-	Name      string
-	Image     string
-	State     string // "running", "stopped", etc.
-	HostPorts []int  // host-side ports
+	Name      string `json:"name"`
+	Image     string `json:"image"`
+	State     string `json:"state"`
+	HostPorts []int  `json:"hostPorts,omitempty"`
 }
 
 var registry []ServicePlugin

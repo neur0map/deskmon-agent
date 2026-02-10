@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -60,6 +61,50 @@ func (sd *ServiceDetector) Start() {
 // Stop terminates the background loops.
 func (sd *ServiceDetector) Stop() {
 	close(sd.stopCh)
+}
+
+// DebugInfo returns a snapshot of the detection environment for diagnostics.
+type DebugSnapshot struct {
+	Plugins      []string            `json:"plugins"`
+	Containers   []ContainerInfo     `json:"containers"`
+	Processes    []string            `json:"processes"`
+	ProcessPorts map[string][]int    `json:"processPorts"`
+	Detected     map[string]string   `json:"detected"` // pluginID → baseURL
+	Stats        []ServiceStats      `json:"stats"`
+}
+
+func (sd *ServiceDetector) DebugInfo() DebugSnapshot {
+	env := BuildDetectionEnv(sd.dockerSocket)
+
+	plugins := RegisteredPlugins()
+	pluginNames := make([]string, len(plugins))
+	for i, p := range plugins {
+		pluginNames[i] = p.ID()
+	}
+
+	procs := make([]string, 0, len(env.Processes))
+	for name := range env.Processes {
+		procs = append(procs, name)
+	}
+	sort.Strings(procs)
+
+	sd.mu.RLock()
+	detected := make(map[string]string, len(sd.detected))
+	for id, svc := range sd.detected {
+		detected[id] = svc.BaseURL
+	}
+	stats := make([]ServiceStats, len(sd.cachedStats))
+	copy(stats, sd.cachedStats)
+	sd.mu.RUnlock()
+
+	return DebugSnapshot{
+		Plugins:      pluginNames,
+		Containers:   env.Containers,
+		Processes:    procs,
+		ProcessPorts: env.ProcessPorts,
+		Detected:     detected,
+		Stats:        stats,
+	}
 }
 
 // Collect returns the latest cached service stats.

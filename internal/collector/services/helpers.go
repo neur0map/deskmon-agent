@@ -34,14 +34,43 @@ func (e *DetectionEnv) FindDockerImage(match string) *ContainerInfo {
 	return nil
 }
 
-// HasProcess returns true if a process with the given name is running.
+// HasProcess returns true if a process with the given name is running (exact match).
 func (e *DetectionEnv) HasProcess(name string) bool {
 	return e.Processes[name]
+}
+
+// HasProcessSubstring returns true if any running process name contains the substring.
+func (e *DetectionEnv) HasProcessSubstring(substr string) bool {
+	lower := strings.ToLower(substr)
+	for name := range e.Processes {
+		if strings.Contains(strings.ToLower(name), lower) {
+			return true
+		}
+	}
+	return false
 }
 
 // FindProcessPorts returns TCP ports that processes with the given name are listening on.
 func (e *DetectionEnv) FindProcessPorts(name string) []int {
 	return e.ProcessPorts[name]
+}
+
+// FindProcessPortsBySubstring returns TCP ports for any process whose name contains substr.
+func (e *DetectionEnv) FindProcessPortsBySubstring(substr string) []int {
+	lower := strings.ToLower(substr)
+	var ports []int
+	seen := make(map[int]bool)
+	for name, pp := range e.ProcessPorts {
+		if strings.Contains(strings.ToLower(name), lower) {
+			for _, p := range pp {
+				if !seen[p] {
+					seen[p] = true
+					ports = append(ports, p)
+				}
+			}
+		}
+	}
+	return ports
 }
 
 // ProbeHTTP tries an HTTP GET on localhost at each port+path combination.

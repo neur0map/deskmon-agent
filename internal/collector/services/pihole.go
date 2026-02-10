@@ -41,10 +41,15 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 	}
 
 	// Strategy 2: pihole-FTL process running (bare metal install)
-	if env.HasProcess("pihole-FTL") {
+	// Use substring match — comm name might be "pihole-FTL", "pihole", etc.
+	if env.HasProcess("pihole-FTL") || env.HasProcessSubstring("pihole") {
 		// Use actual listening ports discovered from /proc/net/tcp
-		if ports := env.FindProcessPorts("pihole-FTL"); len(ports) > 0 {
-			log.Printf("services: pihole-FTL listening on ports %v", ports)
+		ports := env.FindProcessPorts("pihole-FTL")
+		if len(ports) == 0 {
+			ports = env.FindProcessPortsBySubstring("pihole")
+		}
+		if len(ports) > 0 {
+			log.Printf("services: pihole process listening on ports %v", ports)
 			if url := p.probeAPI(env, ports); url != "" {
 				base.BaseURL = url
 				log.Printf("services: pihole detected via process ports at %s", url)
@@ -68,6 +73,8 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 			log.Printf("services: pihole detected via common ports at %s", url)
 			return base
 		}
+
+		log.Printf("services: pihole process found but no API reachable")
 	}
 
 	// No blind probe — too many false positives without process confirmation

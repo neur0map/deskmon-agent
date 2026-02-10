@@ -51,3 +51,7 @@ func (s *Server) handleProcessStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleServiceStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.services.Collect())
 }
+
+func (s *Server) handleServiceDebug(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.services.DebugInfo())
+}
