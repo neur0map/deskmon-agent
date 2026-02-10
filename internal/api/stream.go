@@ -33,6 +33,10 @@ func (s *Server) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx/proxy buffering
 	flusher.Flush()
 
+	// Send initial comment to bust through client-side buffers and confirm connection
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
 	// Subscribe to all broadcasters
 	sysCh, sysCleanup := s.system.Broadcast.Subscribe(2)
 	defer sysCleanup()
@@ -43,7 +47,7 @@ func (s *Server) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 	svcCh, svcCleanup := s.services.Broadcast.Subscribe(2)
 	defer svcCleanup()
 
-	keepalive := time.NewTicker(30 * time.Second)
+	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
 
 	ctx := r.Context()
