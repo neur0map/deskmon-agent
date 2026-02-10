@@ -62,14 +62,18 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 }
 
 // probeAPI tries Pi-hole v5 and v6 API endpoints on the given ports.
-// Returns the base URL if found, and sets version in the DetectedService meta.
+// Returns the base URL if found.
 func (p *PiHolePlugin) probeAPI(env *DetectionEnv, ports []int) string {
-	// Try v5 first (most common)
+	// Try v5 API endpoint
 	if url := env.ProbeHTTP(ports, "/admin/api.php?summaryRaw"); url != "" {
 		return url
 	}
-	// Try v6
+	// Try v6 API endpoint
 	if url := env.ProbeHTTP(ports, "/api/info"); url != "" {
+		return url
+	}
+	// Try the admin landing page (always responds, even with auth enabled)
+	if url := env.ProbeHTTP(ports, "/admin/"); url != "" {
 		return url
 	}
 	return ""

@@ -79,9 +79,11 @@ func (sd *ServiceDetector) Collect() []ServiceStats {
 func (sd *ServiceDetector) runDetection() {
 	plugins := RegisteredPlugins()
 	if len(plugins) == 0 {
+		log.Println("services: no plugins registered")
 		return
 	}
 
+	log.Printf("services: running detection with %d plugins", len(plugins))
 	env := BuildDetectionEnv(sd.dockerSocket)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -101,6 +103,8 @@ func (sd *ServiceDetector) runDetection() {
 				log.Printf("services: detected %s at %s", svc.Name, svc.BaseURL)
 			}
 			sd.detected[p.ID()] = svc
+		} else {
+			log.Printf("services: plugin %s did not detect a service", p.ID())
 		}
 	}
 
