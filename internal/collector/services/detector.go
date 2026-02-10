@@ -34,11 +34,13 @@ func NewServiceDetector(dockerSocket string) *ServiceDetector {
 }
 
 // Start begins background detection and collection loops.
+// Detection runs asynchronously so the HTTP server can start immediately.
 func (sd *ServiceDetector) Start() {
-	sd.runDetection()
-	sd.runCollection()
-
 	go func() {
+		// Run initial detection + collection in the background
+		sd.runDetection()
+		sd.runCollection()
+
 		detectTicker := time.NewTicker(detectInterval)
 		collectTicker := time.NewTicker(collectInterval)
 		defer detectTicker.Stop()

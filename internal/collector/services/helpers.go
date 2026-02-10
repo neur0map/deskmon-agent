@@ -74,11 +74,13 @@ func (e *DetectionEnv) FindProcessPortsBySubstring(substr string) []int {
 	return ports
 }
 
-// ProbeHTTP tries HTTP and HTTPS GET on localhost at each port+path combination.
+// ProbeHTTP tries an HTTP GET on localhost at each port+path combination.
+// For typical HTTPS ports (443, 8443, 9443) it tries HTTPS first, then HTTP.
+// For all other ports it tries HTTP first, then HTTPS as fallback.
 // Returns the base URL (scheme://host:port) of the first successful probe, or "".
 func (e *DetectionEnv) ProbeHTTP(ports []int, path string) string {
 	cl := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: 1500 * time.Millisecond,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -86,22 +88,45 @@ func (e *DetectionEnv) ProbeHTTP(ports []int, path string) string {
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	hosts := []string{"127.0.0.1", "localhost"}
-	schemes := []string{"http", "https"}
+
+	isHTTPSPort := func(port int) bool {
+		return port == 443 || port == 8443 || port == 9443 || port == 4443
+	}
+
+	tryProbe := func(scheme, host string, port int) string {
+		url := fmt.Sprintf("%s://%s:%d%s", scheme, host, port, path)
+		resp, err := cl.Get(url)
+		if err != nil {
+			return ""
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			base := fmt.Sprintf("%s://%s:%d", scheme, host, port)
+			log.Printf("services: probe hit %s (HTTP %d)", url, resp.StatusCode)
+			return base
+		}
+		return ""
+	}
+
 	for _, port := range ports {
-		for _, host := range hosts {
-			for _, scheme := range schemes {
-				url := fmt.Sprintf("%s://%s:%d%s", scheme, host, port, path)
-				resp, err := cl.Get(url)
-				if err != nil {
-					continue
-				}
-				resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-					base := fmt.Sprintf("%s://%s:%d", scheme, host, port)
-					log.Printf("services: probe hit %s (HTTP %d)", url, resp.StatusCode)
-					return base
-				}
+		// Pick scheme order based on port
+		var schemes []string
+		if isHTTPSPort(port) {
+			schemes = []string{"https", "http"}
+		} else {
+			schemes = []string{"http", "https"}
+		}
+
+		// Try 127.0.0.1 first (avoids DNS resolution), fall back to localhost
+		for _, scheme := range schemes {
+			if base := tryProbe(scheme, "127.0.0.1", port); base != "" {
+				return base
+			}
+		}
+		// Only try localhost if 127.0.0.1 failed completely
+		for _, scheme := range schemes {
+			if base := tryProbe(scheme, "localhost", port); base != "" {
+				return base
 			}
 		}
 	}
