@@ -87,8 +87,15 @@ func (p *PiHolePlugin) probeAPI(env *DetectionEnv, ports []int) string {
 	if url := env.ProbeHTTP(ports, "/admin/api.php?summaryRaw"); url != "" {
 		return url
 	}
-	// Try v6 API endpoint
-	if url := env.ProbeHTTP(ports, "/api/info"); url != "" {
+	// Try v6 API endpoints (v6 restructured the entire API)
+	if url := env.ProbeHTTP(ports, "/api/dns/blocking"); url != "" {
+		return url
+	}
+	if url := env.ProbeHTTP(ports, "/api/auth"); url != "" {
+		return url
+	}
+	// Try admin page (works on both v5 and v6)
+	if url := env.ProbeHTTP(ports, "/admin/"); url != "" {
 		return url
 	}
 	return ""
@@ -143,6 +150,7 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 	}
 
 	// Try v5 API first
+	v5err := ""
 	if data, err := p.collectV5(ctx, svc.BaseURL); err == nil {
 		stats.Summary = data.summary
 		stats.Stats = data.stats
@@ -151,10 +159,26 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 			svc.Version = "v5"
 		}
 		return stats, nil
+	} else {
+		v5err = err.Error()
 	}
 
 	// Try v6 API
+	v6err := ""
 	if data, err := p.collectV6(ctx, svc.BaseURL); err == nil {
+		stats.Summary = data.summary
+		stats.Stats = data.stats
+		stats.Status = data.status
+		if svc.Version == "" {
+			svc.Version = "v6"
+		}
+		return stats, nil
+	} else {
+		v6err = err.Error()
+	}
+
+	// Try v6 public endpoint (no auth required)
+	if data, err := p.collectV6Public(ctx, svc.BaseURL); err == nil {
 		stats.Summary = data.summary
 		stats.Stats = data.stats
 		stats.Status = data.status
@@ -164,7 +188,7 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 		return stats, nil
 	}
 
-	return nil, fmt.Errorf("could not reach Pi-hole API at %s", svc.BaseURL)
+	return nil, fmt.Errorf("could not reach Pi-hole API at %s (v5: %s, v6: %s)", svc.BaseURL, v5err, v6err)
 }
 
 type piholeData struct {
@@ -273,6 +297,38 @@ func (p *PiHolePlugin) collectV6(ctx context.Context, baseURL string) (*piholeDa
 			"activeClients":   activeClients,
 			"status":          piStatus,
 			"version":         "v6",
+		},
+	}, nil
+}
+
+// collectV6Public fetches minimal stats from Pi-hole v6's public endpoints (no auth).
+func (p *PiHolePlugin) collectV6Public(ctx context.Context, baseURL string) (*piholeData, error) {
+	// /api/dns/blocking is publicly accessible in Pi-hole v6
+	body, err := HTTPGet(ctx, baseURL+"/api/dns/blocking")
+	if err != nil {
+		return nil, err
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+
+	blocking, _ := raw["blocking"].(string)
+	piStatus := "running"
+	if blocking == "disabled" {
+		piStatus = "stopped"
+	}
+
+	return &piholeData{
+		status: piStatus,
+		summary: []StatItem{
+			{Label: "DNS Blocking", Value: blocking, Type: "status"},
+		},
+		stats: map[string]interface{}{
+			"blocking": blocking,
+			"status":   piStatus,
+			"version":  "v6",
 		},
 	}, nil
 }

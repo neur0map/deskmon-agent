@@ -36,13 +36,19 @@ func (p *TraefikPlugin) Detect(ctx context.Context, env *DetectionEnv) *Detected
 		}
 	}
 
-	// Strategy 2: traefik process running
+	// Strategy 2: traefik process running (bare metal or visible in proc namespace)
 	if env.HasProcess("traefik") {
 		ports := env.FindProcessPorts("traefik")
 		ports = append(ports, 8080, 8443, 9090)
 		if url := env.ProbeHTTP(ports, "/api/overview"); url != "" {
 			base.BaseURL = url
 			log.Printf("services: traefik detected via process at %s", url)
+			return base
+		}
+		// Traefik in Docker: API may only be on mapped host ports
+		if url := env.ProbeHTTP([]int{80, 443}, "/api/overview"); url != "" {
+			base.BaseURL = url
+			log.Printf("services: traefik detected via host ports at %s", url)
 			return base
 		}
 	}

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -73,28 +74,34 @@ func (e *DetectionEnv) FindProcessPortsBySubstring(substr string) []int {
 	return ports
 }
 
-// ProbeHTTP tries an HTTP GET on localhost at each port+path combination.
-// Returns the base URL (http://host:port) of the first successful probe, or "".
+// ProbeHTTP tries HTTP and HTTPS GET on localhost at each port+path combination.
+// Returns the base URL (scheme://host:port) of the first successful probe, or "".
 func (e *DetectionEnv) ProbeHTTP(ports []int, path string) string {
 	cl := &http.Client{
 		Timeout: 2 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // don't follow redirects, just check status
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 	hosts := []string{"127.0.0.1", "localhost"}
+	schemes := []string{"http", "https"}
 	for _, port := range ports {
 		for _, host := range hosts {
-			url := fmt.Sprintf("http://%s:%d%s", host, port, path)
-			resp, err := cl.Get(url)
-			if err != nil {
-				continue
-			}
-			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-				base := fmt.Sprintf("http://%s:%d", host, port)
-				log.Printf("services: probe hit %s (HTTP %d)", url, resp.StatusCode)
-				return base
+			for _, scheme := range schemes {
+				url := fmt.Sprintf("%s://%s:%d%s", scheme, host, port, path)
+				resp, err := cl.Get(url)
+				if err != nil {
+					continue
+				}
+				resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+					base := fmt.Sprintf("%s://%s:%d", scheme, host, port)
+					log.Printf("services: probe hit %s (HTTP %d)", url, resp.StatusCode)
+					return base
+				}
 			}
 		}
 	}
@@ -102,12 +109,18 @@ func (e *DetectionEnv) ProbeHTTP(ports []int, path string) string {
 }
 
 // HTTPGet performs a GET request with context and returns the response body.
+// Accepts self-signed certs for localhost services.
 func HTTPGet(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	cl := &http.Client{Timeout: 5 * time.Second}
+	cl := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, err
