@@ -5,28 +5,39 @@ import (
 	"encoding/json"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 )
 
+type PortMapping struct {
+	HostPort      int    `json:"hostPort"`
+	ContainerPort int    `json:"containerPort"`
+	Protocol      string `json:"protocol"`
+}
+
 type ContainerStats struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	Image           string  `json:"image"`
-	Status          string  `json:"status"`
-	CPUPercent      float64 `json:"cpuPercent"`
-	MemoryUsageMB   float64 `json:"memoryUsageMB"`
-	MemoryLimitMB   float64 `json:"memoryLimitMB"`
-	NetworkRxBytes  uint64  `json:"networkRxBytes"`
-	NetworkTxBytes  uint64  `json:"networkTxBytes"`
-	BlockReadBytes  uint64  `json:"blockReadBytes"`
-	BlockWriteBytes uint64  `json:"blockWriteBytes"`
-	PIDs            uint64  `json:"pids"`
-	StartedAt       string  `json:"startedAt"`
+	ID              string        `json:"id"`
+	Name            string        `json:"name"`
+	Image           string        `json:"image"`
+	Status          string        `json:"status"`
+	CPUPercent      float64       `json:"cpuPercent"`
+	MemoryUsageMB   float64       `json:"memoryUsageMB"`
+	MemoryLimitMB   float64       `json:"memoryLimitMB"`
+	NetworkRxBytes  uint64        `json:"networkRxBytes"`
+	NetworkTxBytes  uint64        `json:"networkTxBytes"`
+	BlockReadBytes  uint64        `json:"blockReadBytes"`
+	BlockWriteBytes uint64        `json:"blockWriteBytes"`
+	PIDs            uint64        `json:"pids"`
+	StartedAt       string        `json:"startedAt"`
+	Ports           []PortMapping `json:"ports"`
+	RestartCount    int           `json:"restartCount"`
+	HealthStatus    string        `json:"healthStatus"`
 }
 
 type DockerCollector struct {
@@ -62,10 +73,12 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 	var wg sync.WaitGroup
 	for i, c := range containers {
 		results[i] = ContainerStats{
-			ID:     c.ID[:12],
-			Name:   cleanContainerName(c.Names),
-			Image:  c.Image,
-			Status: normalizeStatus(c.State),
+			ID:           c.ID[:12],
+			Name:         cleanContainerName(c.Names),
+			Image:        c.Image,
+			Status:       normalizeStatus(c.State),
+			Ports:        []PortMapping{},
+			HealthStatus: "none",
 		}
 
 		wg.Add(1)
@@ -77,10 +90,19 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 				dc.fillRunningStats(ctx, cli, ctr.ID, &results[idx])
 			}
 
-			// Get started time from container inspect
+			// Get started time, restart count, health, and ports from inspect
 			info, inspectErr := cli.ContainerInspect(ctx, ctr.ID)
-			if inspectErr == nil && info.State != nil {
-				results[idx].StartedAt = info.State.StartedAt
+			if inspectErr == nil {
+				if info.State != nil {
+					results[idx].StartedAt = info.State.StartedAt
+					if info.State.Health != nil {
+						results[idx].HealthStatus = info.State.Health.Status
+					}
+				}
+				results[idx].RestartCount = info.RestartCount
+				if info.NetworkSettings != nil {
+					results[idx].Ports = extractPorts(info.NetworkSettings.Ports)
+				}
 			}
 		}(i, c)
 	}
@@ -176,4 +198,27 @@ func normalizeStatus(state string) string {
 	default:
 		return "stopped"
 	}
+}
+
+func extractPorts(portMap nat.PortMap) []PortMapping {
+	var ports []PortMapping
+	for containerPort, bindings := range portMap {
+		cPort := containerPort.Int()
+		proto := containerPort.Proto()
+		for _, binding := range bindings {
+			hPort, err := strconv.Atoi(binding.HostPort)
+			if err != nil {
+				continue
+			}
+			ports = append(ports, PortMapping{
+				HostPort:      hPort,
+				ContainerPort: cPort,
+				Protocol:      proto,
+			})
+		}
+	}
+	if ports == nil {
+		return []PortMapping{}
+	}
+	return ports
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -15,13 +16,15 @@ import (
 )
 
 type Server struct {
-	cfg       *config.Config
-	system    *collector.SystemCollector
-	docker    *collector.DockerCollector
-	version   string
-	httpSrv   *http.Server
-	rateMu    sync.Mutex
-	rateMap   map[string]*rateBucket
+	cfg          *config.Config
+	system       *collector.SystemCollector
+	docker       *collector.DockerCollector
+	version      string
+	httpSrv      *http.Server
+	dockerSocket string
+	rateMu       sync.Mutex
+	rateMap      map[string]*rateBucket
+	stopCh       chan struct{}
 }
 
 type rateBucket struct {
@@ -37,11 +40,13 @@ const (
 
 func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, version string) *Server {
 	return &Server{
-		cfg:     cfg,
-		system:  system,
-		docker:  docker,
-		version: version,
-		rateMap: make(map[string]*rateBucket),
+		cfg:          cfg,
+		system:       system,
+		docker:       docker,
+		version:      version,
+		dockerSocket: config.DefaultDockerSock,
+		rateMap:      make(map[string]*rateBucket),
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -62,6 +67,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /agent/stop", s.authMiddleware(s.handleAgentStop))
 	mux.HandleFunc("GET /agent/status", s.authMiddleware(s.handleAgentStatus))
 
+	// Container action endpoints
+	mux.HandleFunc("POST /containers/{id}/start", s.authMiddleware(s.handleContainerStart))
+	mux.HandleFunc("POST /containers/{id}/stop", s.authMiddleware(s.handleContainerStop))
+	mux.HandleFunc("POST /containers/{id}/restart", s.authMiddleware(s.handleContainerRestart))
+
 	handler := s.rateLimitMiddleware(s.securityHeaders(mux))
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Bind, s.cfg.Port)
@@ -74,10 +84,13 @@ func (s *Server) Start() error {
 		MaxHeaderBytes:    1 << 13, // 8KB
 	}
 
+	s.startRateCleanup()
+
 	return s.httpSrv.ListenAndServe()
 }
 
 func (s *Server) Shutdown() error {
+	close(s.stopCh)
 	if s.httpSrv != nil {
 		return s.httpSrv.Close()
 	}
@@ -121,6 +134,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 		if bucket.tokens <= 0 {
 			s.rateMu.Unlock()
+			log.Printf("rate limit exceeded for %s on %s %s", ip, r.Method, r.URL.Path)
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, "", http.StatusTooManyRequests)
 			return
@@ -135,26 +149,30 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+
 		if s.cfg.AuthToken == "" {
-			// No token configured — reject all authenticated requests
+			log.Printf("auth reject %s %s from %s: no token configured on agent", r.Method, r.URL.Path, ip)
 			http.Error(w, "", http.StatusUnauthorized)
 			return
 		}
 
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
+			log.Printf("auth reject %s %s from %s: missing Authorization header", r.Method, r.URL.Path, ip)
 			http.Error(w, "", http.StatusUnauthorized)
 			return
 		}
 
 		token := strings.TrimPrefix(auth, "Bearer ")
 		if token == auth {
-			// No "Bearer " prefix found
+			log.Printf("auth reject %s %s from %s: missing Bearer prefix", r.Method, r.URL.Path, ip)
 			http.Error(w, "", http.StatusUnauthorized)
 			return
 		}
 
 		if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AuthToken)) != 1 {
+			log.Printf("auth reject %s %s from %s: invalid token", r.Method, r.URL.Path, ip)
 			http.Error(w, "", http.StatusUnauthorized)
 			return
 		}
@@ -168,4 +186,38 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		http.Error(w, "", http.StatusInternalServerError)
 	}
+}
+
+func clientIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+func (s *Server) sweepRateBuckets() {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	cutoff := 2 * ratePeriod
+	for ip, bucket := range s.rateMap {
+		if time.Since(bucket.lastReset) > cutoff {
+			delete(s.rateMap, ip)
+		}
+	}
+}
+
+func (s *Server) startRateCleanup() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.sweepRateBuckets()
+			case <-s.stopCh:
+				return
+			}
+		}
+	}()
 }
