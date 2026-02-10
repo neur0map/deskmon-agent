@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,20 @@ type NetworkStats struct {
 	UploadBytesPerSec   float64 `json:"uploadBytesPerSec"`
 }
 
+type ProcessInfo struct {
+	PID           int32   `json:"pid"`
+	Name          string  `json:"name"`
+	CPUPercent    float64 `json:"cpuPercent"`
+	MemoryMB      float64 `json:"memoryMB"`
+	MemoryPercent float64 `json:"memoryPercent"`
+}
+
+type processCPUSample struct {
+	utime     uint64
+	stime     uint64
+	timestamp time.Time
+}
+
 type cpuSample struct {
 	total uint64
 	idle  uint64
@@ -62,13 +77,20 @@ type SystemCollector struct {
 	netDownload float64
 	netUpload   float64
 	stopCh      chan struct{}
+
+	// Process monitoring
+	prevProcCPU  map[int32]processCPUSample
+	topProcesses []ProcessInfo
+	totalMemKB   uint64
 }
 
 func NewSystemCollector() *SystemCollector {
 	sc := &SystemCollector{
-		stopCh: make(chan struct{}),
+		stopCh:      make(chan struct{}),
+		prevProcCPU: make(map[int32]processCPUSample),
 	}
 	sc.coreCount = countCPUCores()
+	sc.totalMemKB = readTotalMemKB()
 	// Take initial samples so first delta is meaningful
 	sc.prevCPU = readCPUSample()
 	sc.prevNet = readNetSample()
@@ -116,6 +138,10 @@ func (sc *SystemCollector) sample() {
 		sc.netUpload = math.Round(sc.netUpload*100) / 100
 	}
 	sc.prevNet = netCur
+
+	// Process sampling
+	sc.sampleProcesses()
+
 	sc.mu.Unlock()
 }
 
@@ -145,6 +171,207 @@ func (sc *SystemCollector) Collect() SystemStats {
 		},
 		Uptime: uptime,
 	}
+}
+
+// CollectTopProcesses returns the pre-calculated top processes by CPU usage.
+func (sc *SystemCollector) CollectTopProcesses(limit int) []ProcessInfo {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+
+	if limit > len(sc.topProcesses) {
+		limit = len(sc.topProcesses)
+	}
+	result := make([]ProcessInfo, limit)
+	copy(result, sc.topProcesses[:limit])
+	return result
+}
+
+// sampleProcesses reads /proc/ to collect per-process CPU and memory stats.
+// Must be called with sc.mu held for writing.
+func (sc *SystemCollector) sampleProcesses() {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	clkTck := float64(100) // standard Linux USER_HZ
+	numCPU := sc.coreCount
+	if numCPU < 1 {
+		numCPU = 1
+	}
+
+	totalMemKB := sc.totalMemKB
+	if totalMemKB == 0 {
+		totalMemKB = readTotalMemKB()
+		sc.totalMemKB = totalMemKB
+	}
+
+	currentPIDs := make(map[int32]struct{})
+	var processes []ProcessInfo
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid64, err := strconv.ParseInt(entry.Name(), 10, 32)
+		if err != nil {
+			continue
+		}
+		pid := int32(pid64)
+		currentPIDs[pid] = struct{}{}
+
+		procDir := filepath.Join("/proc", entry.Name())
+
+		// Read CPU times from /proc/<pid>/stat
+		name, utime, stime, ok := readProcStat(procDir)
+		if !ok {
+			continue
+		}
+
+		// Read RSS from /proc/<pid>/status
+		rssKB := readProcRSS(procDir)
+
+		// Calculate CPU percent as delta from previous sample
+		var cpuPercent float64
+		if prev, exists := sc.prevProcCPU[pid]; exists {
+			elapsed := now.Sub(prev.timestamp).Seconds()
+			if elapsed > 0 {
+				totalTicks := float64((utime - prev.utime) + (stime - prev.stime))
+				cpuPercent = (totalTicks / clkTck) / elapsed * 100.0 / float64(numCPU)
+				cpuPercent = math.Round(cpuPercent*100) / 100
+				if cpuPercent < 0 {
+					cpuPercent = 0
+				}
+			}
+		}
+
+		// Update previous sample
+		sc.prevProcCPU[pid] = processCPUSample{
+			utime:     utime,
+			stime:     stime,
+			timestamp: now,
+		}
+
+		memMB := float64(rssKB) / 1024.0
+		memMB = math.Round(memMB*100) / 100
+
+		var memPercent float64
+		if totalMemKB > 0 {
+			memPercent = float64(rssKB) / float64(totalMemKB) * 100.0
+			memPercent = math.Round(memPercent*100) / 100
+		}
+
+		processes = append(processes, ProcessInfo{
+			PID:           pid,
+			Name:          name,
+			CPUPercent:    cpuPercent,
+			MemoryMB:      memMB,
+			MemoryPercent: memPercent,
+		})
+	}
+
+	// Clean up stale entries for dead processes
+	for pid := range sc.prevProcCPU {
+		if _, alive := currentPIDs[pid]; !alive {
+			delete(sc.prevProcCPU, pid)
+		}
+	}
+
+	// Sort by CPU percent descending
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i].CPUPercent > processes[j].CPUPercent
+	})
+
+	// Keep top 10 (or whatever the max we might need)
+	const maxKeep = 10
+	if len(processes) > maxKeep {
+		processes = processes[:maxKeep]
+	}
+
+	sc.topProcesses = processes
+}
+
+// readProcStat reads /proc/<pid>/stat and returns the process name and CPU times.
+// Returns (name, utime, stime, ok).
+func readProcStat(procDir string) (string, uint64, uint64, bool) {
+	data, err := os.ReadFile(filepath.Join(procDir, "stat"))
+	if err != nil {
+		return "", 0, 0, false
+	}
+
+	content := string(data)
+
+	// The process name is in parentheses and can contain spaces and special chars.
+	// Find the last ')' to handle names like "(my process)" correctly.
+	openParen := strings.IndexByte(content, '(')
+	closeParen := strings.LastIndexByte(content, ')')
+	if openParen < 0 || closeParen < 0 || closeParen <= openParen {
+		return "", 0, 0, false
+	}
+
+	name := content[openParen+1 : closeParen]
+
+	// Fields after the closing paren: state, ppid, pgrp, session, tty_nr,
+	// tpgid, flags, minflt, cminflt, majflt, cmajflt, utime(14), stime(15)
+	// Index relative to after ')': field 0=state, ..., field 11=utime, field 12=stime
+	rest := strings.TrimSpace(content[closeParen+1:])
+	fields := strings.Fields(rest)
+	// utime is at index 11 (field 14 overall, minus 3 for pid/name/state offset)
+	// Actually: fields after ')' are indexed from 0.
+	// field 0 = state (field 3 overall)
+	// field 11 = utime (field 14 overall)
+	// field 12 = stime (field 15 overall)
+	if len(fields) < 13 {
+		return "", 0, 0, false
+	}
+
+	utime, err := strconv.ParseUint(fields[11], 10, 64)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	stime, err := strconv.ParseUint(fields[12], 10, 64)
+	if err != nil {
+		return "", 0, 0, false
+	}
+
+	return name, utime, stime, true
+}
+
+// readProcRSS reads VmRSS from /proc/<pid>/status and returns the value in kB.
+func readProcRSS(procDir string) uint64 {
+	f, err := os.Open(filepath.Join(procDir, "status"))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "VmRSS:") {
+			return parseMemInfoValue(line)
+		}
+	}
+	return 0
+}
+
+// readTotalMemKB reads the total system memory in kB from /proc/meminfo.
+func readTotalMemKB() uint64 {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "MemTotal:") {
+			return parseMemInfoValue(line)
+		}
+	}
+	return 0
 }
 
 func countCPUCores() int {
