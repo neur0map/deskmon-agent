@@ -188,6 +188,23 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 		return stats, nil
 	}
 
+	// If we got 401 from v6, Pi-hole is running but needs auth — return minimal stats
+	if strings.Contains(v6err, "401") {
+		if svc.Version == "" {
+			svc.Version = "v6"
+		}
+		stats.Status = "running"
+		stats.Summary = []StatItem{
+			{Label: "Version", Value: "v6", Type: "text"},
+			{Label: "Status", Value: "Running", Type: "status"},
+		}
+		stats.Stats = map[string]interface{}{
+			"version":      "v6",
+			"authRequired": true,
+		}
+		return stats, nil
+	}
+
 	return nil, fmt.Errorf("could not reach Pi-hole API at %s (v5: %s, v6: %s)", svc.BaseURL, v5err, v6err)
 }
 
