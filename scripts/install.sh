@@ -10,15 +10,17 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 DEFAULT_PORT=7654
 PORT="${DEFAULT_PORT}"
+BINARY_PATH=""
 UNINSTALL=false
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --port PORT    Set the listening port (default: ${DEFAULT_PORT})"
-    echo "  --uninstall    Remove deskmon-agent and all configuration"
-    echo "  --help         Show this help message"
+    echo "  --port PORT      Set the listening port (default: ${DEFAULT_PORT})"
+    echo "  --binary PATH    Path to the built binary (default: auto-detect)"
+    echo "  --uninstall      Remove deskmon-agent and all configuration"
+    echo "  --help           Show this help message"
 }
 
 # Parse arguments
@@ -26,6 +28,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)
             PORT="$2"
+            shift 2
+            ;;
+        --binary)
+            BINARY_PATH="$2"
             shift 2
             ;;
         --uninstall)
@@ -89,19 +95,46 @@ generate_token() {
     head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
-do_install() {
-    local SCRIPT_DIR
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    local BINARY_PATH="${SCRIPT_DIR}/${BINARY_NAME}"
-
-    # Verify binary exists
-    if [[ ! -f "${BINARY_PATH}" ]]; then
-        echo "Error: ${BINARY_NAME} binary not found in ${SCRIPT_DIR}"
-        echo "Make sure the binary is in the same directory as this script."
+find_binary() {
+    # If --binary was provided, use that
+    if [[ -n "${BINARY_PATH}" ]]; then
+        if [[ -f "${BINARY_PATH}" ]]; then
+            echo "${BINARY_PATH}"
+            return
+        fi
+        echo "Error: binary not found at ${BINARY_PATH}" >&2
         exit 1
     fi
 
+    # Auto-detect: check common locations relative to script
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    local REPO_DIR
+    REPO_DIR="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd || echo "")"
+
+    # Check bin/ in repo root (built by make setup)
+    if [[ -n "${REPO_DIR}" && -f "${REPO_DIR}/bin/${BINARY_NAME}" ]]; then
+        echo "${REPO_DIR}/bin/${BINARY_NAME}"
+        return
+    fi
+
+    # Check same directory as script (package deployment)
+    if [[ -f "${SCRIPT_DIR}/${BINARY_NAME}" ]]; then
+        echo "${SCRIPT_DIR}/${BINARY_NAME}"
+        return
+    fi
+
+    echo "Error: ${BINARY_NAME} binary not found" >&2
+    echo "  Run 'make build' first, or pass --binary /path/to/${BINARY_NAME}" >&2
+    exit 1
+}
+
+do_install() {
+    local FOUND_BINARY
+    FOUND_BINARY="$(find_binary)"
+
     echo "Installing ${BINARY_NAME}..."
+    echo "  Binary: ${FOUND_BINARY}"
 
     # Stop existing service if running
     if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
@@ -110,7 +143,7 @@ do_install() {
     fi
 
     # Install binary
-    cp "${BINARY_PATH}" "${INSTALL_DIR}/${BINARY_NAME}"
+    cp "${FOUND_BINARY}" "${INSTALL_DIR}/${BINARY_NAME}"
     chmod 755 "${INSTALL_DIR}/${BINARY_NAME}"
     echo "  Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
 
@@ -122,6 +155,9 @@ do_install() {
     if [[ -f "${CONFIG_FILE}" ]]; then
         echo "  Existing config preserved at ${CONFIG_FILE}"
         AUTH_TOKEN=$(grep 'auth_token:' "${CONFIG_FILE}" | awk '{print $2}' | tr -d '"')
+        # Read existing port for display
+        EXISTING_PORT=$(grep 'port:' "${CONFIG_FILE}" | awk '{print $2}')
+        PORT="${EXISTING_PORT:-${PORT}}"
     else
         AUTH_TOKEN=$(generate_token)
         cat > "${CONFIG_FILE}" <<CONF
@@ -167,6 +203,10 @@ SERVICE
     systemctl start "${SERVICE_NAME}"
     echo "  Service enabled and started"
 
+    # Get server IP for display
+    local SERVER_IP
+    SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
+
     # Print summary
     echo ""
     echo "==========================================="
@@ -179,7 +219,7 @@ SERVICE
     echo "  Service:    ${SERVICE_NAME}"
     echo ""
     echo "  Add this server to your Deskmon macOS app:"
-    echo "    Address: <server-ip>:${PORT}"
+    echo "    Address: ${SERVER_IP}:${PORT}"
     echo "    Token:   ${AUTH_TOKEN}"
     echo ""
     echo "  Useful commands:"
