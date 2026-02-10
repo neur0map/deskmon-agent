@@ -44,6 +44,8 @@ func main() {
 	defer systemCollector.Stop()
 
 	dockerCollector := collector.NewDockerCollector(config.DefaultDockerSock)
+	dockerCollector.Start()
+	defer dockerCollector.Stop()
 
 	// Initialize service detector (auto-discovers Pi-hole, Traefik, etc.)
 	svcDetector := services.NewServiceDetector(config.DefaultDockerSock)

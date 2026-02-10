@@ -42,16 +42,57 @@ type ContainerStats struct {
 
 type DockerCollector struct {
 	socketPath string
+	mu         sync.RWMutex
+	cached     []ContainerStats
+	stopCh     chan struct{}
 }
 
 func NewDockerCollector(socketPath string) *DockerCollector {
 	return &DockerCollector{
 		socketPath: socketPath,
+		cached:     []ContainerStats{},
+		stopCh:     make(chan struct{}),
 	}
 }
 
+// Start begins background collection on a 5-second ticker.
+func (dc *DockerCollector) Start() {
+	// Run initial collection immediately
+	dc.refresh()
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				dc.refresh()
+			case <-dc.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+// Stop terminates the background collection loop.
+func (dc *DockerCollector) Stop() {
+	close(dc.stopCh)
+}
+
+// Collect returns the latest cached container stats (non-blocking).
 func (dc *DockerCollector) Collect() []ContainerStats {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	dc.mu.RLock()
+	defer dc.mu.RUnlock()
+
+	result := make([]ContainerStats, len(dc.cached))
+	copy(result, dc.cached)
+	return result
+}
+
+// refresh fetches live Docker stats and updates the cache.
+func (dc *DockerCollector) refresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	cli, err := client.NewClientWithOpts(
@@ -59,13 +100,13 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
-		return []ContainerStats{}
+		return
 	}
 	defer cli.Close()
 
 	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
-		return []ContainerStats{}
+		return
 	}
 
 	results := make([]ContainerStats, len(containers))
@@ -85,17 +126,13 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 		go func(idx int, ctr container.Summary) {
 			defer wg.Done()
 
-			// Per-container timeout so one transitioning container
-			// doesn't block the entire stats response.
-			perCtx, perCancel := context.WithTimeout(ctx, 8*time.Second)
+			perCtx, perCancel := context.WithTimeout(ctx, 6*time.Second)
 			defer perCancel()
 
-			// Fetch resource stats for running containers
 			if ctr.State == "running" {
 				dc.fillRunningStats(perCtx, cli, ctr.ID, &results[idx])
 			}
 
-			// Get started time, restart count, health, and ports from inspect
 			info, inspectErr := cli.ContainerInspect(perCtx, ctr.ID)
 			if inspectErr == nil {
 				if info.State != nil {
@@ -113,7 +150,9 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 	}
 	wg.Wait()
 
-	return results
+	dc.mu.Lock()
+	dc.cached = results
+	dc.mu.Unlock()
 }
 
 func (dc *DockerCollector) fillRunningStats(ctx context.Context, cli *client.Client, containerID string, cs *ContainerStats) {
