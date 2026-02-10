@@ -85,13 +85,18 @@ func (dc *DockerCollector) Collect() []ContainerStats {
 		go func(idx int, ctr container.Summary) {
 			defer wg.Done()
 
+			// Per-container timeout so one transitioning container
+			// doesn't block the entire stats response.
+			perCtx, perCancel := context.WithTimeout(ctx, 8*time.Second)
+			defer perCancel()
+
 			// Fetch resource stats for running containers
 			if ctr.State == "running" {
-				dc.fillRunningStats(ctx, cli, ctr.ID, &results[idx])
+				dc.fillRunningStats(perCtx, cli, ctr.ID, &results[idx])
 			}
 
 			// Get started time, restart count, health, and ports from inspect
-			info, inspectErr := cli.ContainerInspect(ctx, ctr.ID)
+			info, inspectErr := cli.ContainerInspect(perCtx, ctr.ID)
 			if inspectErr == nil {
 				if info.State != nil {
 					results[idx].StartedAt = info.State.StartedAt

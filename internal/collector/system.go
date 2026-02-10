@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -49,6 +50,8 @@ type ProcessInfo struct {
 	CPUPercent    float64 `json:"cpuPercent"`
 	MemoryMB      float64 `json:"memoryMB"`
 	MemoryPercent float64 `json:"memoryPercent"`
+	Command       string  `json:"command,omitempty"`
+	User          string  `json:"user,omitempty"`
 }
 
 type processCPUSample struct {
@@ -287,6 +290,13 @@ func (sc *SystemCollector) sampleProcesses() {
 	const maxKeep = 10
 	if len(processes) > maxKeep {
 		processes = processes[:maxKeep]
+	}
+
+	// Enrich top processes with command line and user (only for top N to avoid excess I/O)
+	for i := range processes {
+		procDir := filepath.Join("/proc", strconv.Itoa(int(processes[i].PID)))
+		processes[i].Command = readProcCmdline(procDir)
+		processes[i].User = readProcUser(procDir)
 	}
 
 	sc.topProcesses = processes
@@ -558,6 +568,46 @@ func readUptime() int64 {
 		return 0
 	}
 	return int64(val)
+}
+
+// readProcCmdline reads /proc/<pid>/cmdline and returns the full command line.
+func readProcCmdline(procDir string) string {
+	data, err := os.ReadFile(filepath.Join(procDir, "cmdline"))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	// cmdline is null-byte separated
+	cmdline := strings.ReplaceAll(string(data), "\x00", " ")
+	cmdline = strings.TrimSpace(cmdline)
+	if len(cmdline) > 256 {
+		cmdline = cmdline[:256]
+	}
+	return cmdline
+}
+
+// readProcUser reads the effective UID from /proc/<pid>/status and resolves it to a username.
+func readProcUser(procDir string) string {
+	f, err := os.Open(filepath.Join(procDir, "status"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Uid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				u, err := user.LookupId(fields[1])
+				if err == nil {
+					return u.Username
+				}
+				return fields[1]
+			}
+		}
+	}
+	return ""
 }
 
 // FormatBytes is a helper for logging/debugging, not used in API responses
