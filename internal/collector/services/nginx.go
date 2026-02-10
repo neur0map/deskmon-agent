@@ -47,7 +47,9 @@ func (p *NginxPlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedSe
 
 	// Strategy 2: nginx process running
 	if env.HasProcess("nginx") {
-		if url, path := probeNginxStatus(env, []int{80, 8080, 443, 8443}); url != "" {
+		ports := env.FindProcessPorts("nginx")
+		ports = append(ports, 80, 8080, 443, 8443)
+		if url, path := probeNginxStatus(env, ports); url != "" {
 			base.BaseURL = url
 			base.Meta["statusPath"] = path
 			log.Printf("services: nginx detected via process at %s%s", url, path)

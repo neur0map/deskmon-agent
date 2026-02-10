@@ -38,18 +38,13 @@ func (p *TraefikPlugin) Detect(ctx context.Context, env *DetectionEnv) *Detected
 
 	// Strategy 2: traefik process running
 	if env.HasProcess("traefik") {
-		if url := env.ProbeHTTP([]int{8080, 8443, 9090}, "/api/overview"); url != "" {
+		ports := env.FindProcessPorts("traefik")
+		ports = append(ports, 8080, 8443, 9090)
+		if url := env.ProbeHTTP(ports, "/api/overview"); url != "" {
 			base.BaseURL = url
 			log.Printf("services: traefik detected via process at %s", url)
 			return base
 		}
-	}
-
-	// Strategy 3: Blind probe on common Traefik dashboard ports
-	if url := env.ProbeHTTP([]int{8080, 8443}, "/api/overview"); url != "" {
-		base.BaseURL = url
-		log.Printf("services: traefik detected via port probe at %s", url)
-		return base
 	}
 
 	return nil

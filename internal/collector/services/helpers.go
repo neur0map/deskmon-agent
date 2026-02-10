@@ -18,8 +18,9 @@ import (
 
 // DetectionEnv provides helpers that plugins use to discover services.
 type DetectionEnv struct {
-	Containers []ContainerInfo
-	Processes  map[string]bool // process name → exists
+	Containers   []ContainerInfo
+	Processes    map[string]bool   // process name → exists
+	ProcessPorts map[string][]int  // process name → TCP listening ports
 }
 
 // FindDockerImage returns the first container whose image contains the match string.
@@ -36,6 +37,11 @@ func (e *DetectionEnv) FindDockerImage(match string) *ContainerInfo {
 // HasProcess returns true if a process with the given name is running.
 func (e *DetectionEnv) HasProcess(name string) bool {
 	return e.Processes[name]
+}
+
+// FindProcessPorts returns TCP ports that processes with the given name are listening on.
+func (e *DetectionEnv) FindProcessPorts(name string) []int {
+	return e.ProcessPorts[name]
 }
 
 // ProbeHTTP tries an HTTP GET on localhost at each port+path combination.
@@ -89,16 +95,29 @@ func HTTPGet(ctx context.Context, url string) ([]byte, error) {
 // BuildDetectionEnv constructs a DetectionEnv by querying Docker and /proc.
 func BuildDetectionEnv(dockerSocket string) *DetectionEnv {
 	containers := listDockerContainers(dockerSocket)
-	processes := scanProcessNames()
+	pidNames := scanProcesses()
+	processPorts := discoverProcessPorts(pidNames)
+
+	// Build the exists map
+	processes := make(map[string]bool)
+	for _, name := range pidNames {
+		processes[name] = true
+	}
+
 	log.Printf("services: detection env — %d containers, %d processes", len(containers), len(processes))
 	if len(containers) > 0 {
 		for _, c := range containers {
 			log.Printf("services:   container: %s image=%s state=%s ports=%v", c.Name, c.Image, c.State, c.HostPorts)
 		}
 	}
+	for name, ports := range processPorts {
+		log.Printf("services:   process ports: %s → %v", name, ports)
+	}
+
 	return &DetectionEnv{
-		Containers: containers,
-		Processes:  processes,
+		Containers:   containers,
+		Processes:    processes,
+		ProcessPorts: processPorts,
 	}
 }
 
@@ -147,29 +166,108 @@ func listDockerContainers(socketPath string) []ContainerInfo {
 	return result
 }
 
-// scanProcessNames reads /proc/*/comm to build a set of running process names.
-func scanProcessNames() map[string]bool {
+// scanProcesses reads /proc/*/comm to build a PID→name map.
+func scanProcesses() map[int]string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		log.Printf("services: cannot read /proc: %v", err)
-		return make(map[string]bool)
+		return make(map[int]string)
 	}
 
-	names := make(map[string]bool)
+	pidNames := make(map[int]string)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "comm"))
 		if err != nil {
 			continue
 		}
-		names[strings.TrimSpace(string(data))] = true
+		pidNames[pid] = strings.TrimSpace(string(data))
 	}
-	return names
+	return pidNames
+}
+
+// discoverProcessPorts maps process names to their TCP listening ports
+// by correlating /proc/net/tcp inodes with /proc/{pid}/fd socket links.
+func discoverProcessPorts(pidNames map[int]string) map[string][]int {
+	inodePorts := parseListenSockets()
+	if len(inodePorts) == 0 {
+		return nil
+	}
+
+	result := make(map[string][]int)
+	seen := make(map[string]map[int]bool)
+
+	for pid, name := range pidNames {
+		fdPath := fmt.Sprintf("/proc/%d/fd", pid)
+		entries, err := os.ReadDir(fdPath)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			link, err := os.Readlink(filepath.Join(fdPath, entry.Name()))
+			if err != nil || !strings.HasPrefix(link, "socket:[") {
+				continue
+			}
+			inodeStr := link[8 : len(link)-1]
+			inode, err := strconv.ParseUint(inodeStr, 10, 64)
+			if err != nil {
+				continue
+			}
+			port, ok := inodePorts[inode]
+			if !ok {
+				continue
+			}
+			if seen[name] == nil {
+				seen[name] = make(map[int]bool)
+			}
+			if !seen[name][port] {
+				seen[name][port] = true
+				result[name] = append(result[name], port)
+			}
+		}
+	}
+	return result
+}
+
+// parseListenSockets reads /proc/net/tcp{,6} and returns inode→port for LISTEN sockets.
+func parseListenSockets() map[uint64]int {
+	result := make(map[uint64]int)
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n")[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 10 {
+				continue
+			}
+			// st=0A means LISTEN
+			if fields[3] != "0A" {
+				continue
+			}
+			parts := strings.SplitN(fields[1], ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			port, err := strconv.ParseUint(parts[1], 16, 16)
+			if err != nil {
+				continue
+			}
+			inode, err := strconv.ParseUint(fields[9], 10, 64)
+			if err != nil {
+				continue
+			}
+			result[inode] = int(port)
+		}
+	}
+	return result
 }
 
 // FormatNumber formats an integer with comma separators (e.g. 12345 → "12,345").

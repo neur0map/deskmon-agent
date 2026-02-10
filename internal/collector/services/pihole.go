@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -30,11 +32,9 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 
 	// Strategy 1: Docker container with "pihole" in image name
 	if c := env.FindDockerImage("pihole"); c != nil && c.State == "running" {
-		// Try the container's mapped ports first, then common defaults
 		ports := append(c.HostPorts, 80, 8080)
 		if url := p.probeAPI(env, ports); url != "" {
 			base.BaseURL = url
-			base.Version = base.Meta["version"]
 			log.Printf("services: pihole detected via docker (%s) at %s", c.Image, url)
 			return base
 		}
@@ -42,27 +42,39 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 
 	// Strategy 2: pihole-FTL process running (bare metal install)
 	if env.HasProcess("pihole-FTL") {
-		if url := p.probeAPI(env, []int{80, 8080, 443}); url != "" {
+		// Use actual listening ports discovered from /proc/net/tcp
+		if ports := env.FindProcessPorts("pihole-FTL"); len(ports) > 0 {
+			log.Printf("services: pihole-FTL listening on ports %v", ports)
+			if url := p.probeAPI(env, ports); url != "" {
+				base.BaseURL = url
+				log.Printf("services: pihole detected via process ports at %s", url)
+				return base
+			}
+		}
+
+		// Fallback: read Pi-hole config files for the web port
+		if cfgPort := readPiHoleConfigPort(); cfgPort > 0 {
+			log.Printf("services: pihole config says port %d", cfgPort)
+			if url := p.probeAPI(env, []int{cfgPort}); url != "" {
+				base.BaseURL = url
+				log.Printf("services: pihole detected via config at %s", url)
+				return base
+			}
+		}
+
+		// Last resort: common ports
+		if url := p.probeAPI(env, []int{80, 8080, 443, 8443}); url != "" {
 			base.BaseURL = url
-			base.Version = base.Meta["version"]
-			log.Printf("services: pihole detected via process at %s", url)
+			log.Printf("services: pihole detected via common ports at %s", url)
 			return base
 		}
 	}
 
-	// Strategy 3: Blind HTTP probe on common ports
-	if url := p.probeAPI(env, []int{80, 8080, 4711}); url != "" {
-		base.BaseURL = url
-		base.Version = base.Meta["version"]
-		log.Printf("services: pihole detected via port probe at %s", url)
-		return base
-	}
-
+	// No blind probe — too many false positives without process confirmation
 	return nil
 }
 
 // probeAPI tries Pi-hole v5 and v6 API endpoints on the given ports.
-// Returns the base URL if found.
 func (p *PiHolePlugin) probeAPI(env *DetectionEnv, ports []int) string {
 	// Try v5 API endpoint
 	if url := env.ProbeHTTP(ports, "/admin/api.php?summaryRaw"); url != "" {
@@ -72,11 +84,46 @@ func (p *PiHolePlugin) probeAPI(env *DetectionEnv, ports []int) string {
 	if url := env.ProbeHTTP(ports, "/api/info"); url != "" {
 		return url
 	}
-	// Try the admin landing page (always responds, even with auth enabled)
-	if url := env.ProbeHTTP(ports, "/admin/"); url != "" {
-		return url
-	}
 	return ""
+}
+
+// readPiHoleConfigPort reads Pi-hole config files to find the web interface port.
+func readPiHoleConfigPort() int {
+	// Pi-hole v6: /etc/pihole/pihole.toml — "port = "80,443s""
+	if data, err := os.ReadFile("/etc/pihole/pihole.toml"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "port") && strings.Contains(line, "=") {
+				parts := strings.SplitN(line, "=", 2)
+				val := strings.TrimSpace(parts[1])
+				val = strings.Trim(val, "\"'")
+				// port can be "80,443s" — take first number
+				portStr := strings.Split(val, ",")[0]
+				portStr = strings.TrimSuffix(portStr, "s")
+				if p, err := strconv.Atoi(strings.TrimSpace(portStr)); err == nil && p > 0 {
+					return p
+				}
+			}
+		}
+	}
+
+	// Pi-hole v5: lighttpd config — "server.port = 80"
+	for _, path := range []string{"/etc/lighttpd/external.conf", "/etc/lighttpd/lighttpd.conf"} {
+		if data, err := os.ReadFile(path); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "server.port") {
+					parts := strings.SplitN(line, "=", 2)
+					val := strings.TrimSpace(parts[1])
+					if p, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && p > 0 {
+						return p
+					}
+				}
+			}
+		}
+	}
+
+	return 0
 }
 
 func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*ServiceStats, error) {
