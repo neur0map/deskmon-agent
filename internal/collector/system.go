@@ -83,6 +83,7 @@ type SystemCollector struct {
 
 	// Process monitoring
 	prevProcCPU  map[int32]processCPUSample
+	smoothedCPU  map[int32]float64 // EMA-smoothed CPU per process
 	topProcesses []ProcessInfo
 	totalMemKB   uint64
 }
@@ -91,6 +92,7 @@ func NewSystemCollector() *SystemCollector {
 	sc := &SystemCollector{
 		stopCh:      make(chan struct{}),
 		prevProcCPU: make(map[int32]processCPUSample),
+		smoothedCPU: make(map[int32]float64),
 	}
 	sc.coreCount = countCPUCores()
 	sc.totalMemKB = readTotalMemKB()
@@ -236,18 +238,26 @@ func (sc *SystemCollector) sampleProcesses() {
 		rssKB := readProcRSS(procDir)
 
 		// Calculate CPU percent as delta from previous sample
-		var cpuPercent float64
+		var rawCPU float64
 		if prev, exists := sc.prevProcCPU[pid]; exists {
 			elapsed := now.Sub(prev.timestamp).Seconds()
 			if elapsed > 0 {
 				totalTicks := float64((utime - prev.utime) + (stime - prev.stime))
-				cpuPercent = (totalTicks / clkTck) / elapsed * 100.0 / float64(numCPU)
-				cpuPercent = math.Round(cpuPercent*100) / 100
-				if cpuPercent < 0 {
-					cpuPercent = 0
+				rawCPU = (totalTicks / clkTck) / elapsed * 100.0 / float64(numCPU)
+				if rawCPU < 0 {
+					rawCPU = 0
 				}
 			}
 		}
+
+		// EMA smoothing (alpha=0.3) to prevent noisy per-second fluctuations
+		const emaAlpha = 0.3
+		cpuPercent := rawCPU
+		if prev, exists := sc.smoothedCPU[pid]; exists {
+			cpuPercent = emaAlpha*rawCPU + (1-emaAlpha)*prev
+		}
+		sc.smoothedCPU[pid] = cpuPercent
+		cpuPercent = math.Round(cpuPercent*100) / 100
 
 		// Update previous sample
 		sc.prevProcCPU[pid] = processCPUSample{
@@ -278,11 +288,15 @@ func (sc *SystemCollector) sampleProcesses() {
 	for pid := range sc.prevProcCPU {
 		if _, alive := currentPIDs[pid]; !alive {
 			delete(sc.prevProcCPU, pid)
+			delete(sc.smoothedCPU, pid)
 		}
 	}
 
-	// Sort by CPU percent descending
+	// Sort by CPU percent descending; use PID as tiebreaker for stability
 	sort.Slice(processes, func(i, j int) bool {
+		if math.Abs(processes[i].CPUPercent-processes[j].CPUPercent) < 0.05 {
+			return processes[i].PID < processes[j].PID
+		}
 		return processes[i].CPUPercent > processes[j].CPUPercent
 	})
 
