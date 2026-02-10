@@ -72,6 +72,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /containers/{id}/stop", s.authMiddleware(s.handleContainerStop))
 	mux.HandleFunc("POST /containers/{id}/restart", s.authMiddleware(s.handleContainerRestart))
 
+	// Process action endpoints
+	mux.HandleFunc("POST /processes/{pid}/kill", s.authMiddleware(s.handleProcessKill))
+
 	handler := s.rateLimitMiddleware(s.securityHeaders(mux))
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Bind, s.cfg.Port)
