@@ -1,0 +1,29 @@
+# Binaries
+/bin/
+/dist/
+deskmon-agent
+*.exe
+
+# Build
+*.o
+*.a
+
+# Go
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Config (local testing)
+config.yaml
+*.local.yaml
+
+# Coverage
+coverage.out
+coverage.html
