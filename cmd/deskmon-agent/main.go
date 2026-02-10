@@ -49,13 +49,20 @@ func main() {
 
 	// Initialize service detector (auto-discovers Pi-hole, Traefik, etc.)
 	svcDetector := services.NewServiceDetector(config.DefaultDockerSock)
+
+	// Inject service credentials from config
+	if cfg.Services.PiHole.Password != "" {
+		svcDetector.SetServiceConfig("pihole", "password", cfg.Services.PiHole.Password)
+		log.Println("pihole password loaded from config")
+	}
+
 	svcDetector.Start()
 	defer svcDetector.Stop()
 
 	log.Printf("listening on %s:%d", cfg.Bind, cfg.Port)
 
 	// Start HTTP server
-	srv := api.NewServer(cfg, systemCollector, dockerCollector, svcDetector, Version)
+	srv := api.NewServer(cfg, systemCollector, dockerCollector, svcDetector, Version, *configPath)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)

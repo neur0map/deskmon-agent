@@ -1,14 +1,20 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 func init() {
@@ -21,6 +27,140 @@ type PiHolePlugin struct{}
 func (p *PiHolePlugin) ID() string   { return "pihole" }
 func (p *PiHolePlugin) Name() string { return "Pi-hole" }
 func (p *PiHolePlugin) Icon() string { return "shield.checkerboard" }
+
+// --- Pi-hole v6 session management ---
+
+type piholeSession struct {
+	mu        sync.Mutex
+	sid       string
+	csrf      string
+	expiresAt time.Time
+}
+
+var v6Session = &piholeSession{}
+
+func (s *piholeSession) isValid() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sid != "" && time.Now().Before(s.expiresAt)
+}
+
+func (s *piholeSession) get() (sid, csrf string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sid, s.csrf
+}
+
+func (s *piholeSession) set(sid, csrf string, validity int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sid = sid
+	s.csrf = csrf
+	// Expire slightly early to avoid edge cases
+	if validity <= 0 {
+		validity = 300
+	}
+	s.expiresAt = time.Now().Add(time.Duration(validity-10) * time.Second)
+	log.Printf("services: pihole v6 session acquired (expires in %ds)", validity)
+}
+
+func (s *piholeSession) clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sid = ""
+	s.csrf = ""
+	s.expiresAt = time.Time{}
+}
+
+// authenticate performs POST /api/auth with the given password and caches the session.
+func (s *piholeSession) authenticate(ctx context.Context, baseURL, password string) error {
+	payload, _ := json.Marshal(map[string]string{"password": password})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/auth", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create auth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	cl := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := cl.Do(req)
+	if err != nil {
+		return fmt.Errorf("auth request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return fmt.Errorf("read auth response: %w", err)
+	}
+
+	if resp.StatusCode == 401 {
+		return fmt.Errorf("invalid Pi-hole password")
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("auth returned HTTP %d", resp.StatusCode)
+	}
+
+	// Parse: {"session":{"valid":true,"sid":"...","csrf":"...","validity":300}}
+	var authResp struct {
+		Session struct {
+			Valid    bool   `json:"valid"`
+			SID      string `json:"sid"`
+			CSRF     string `json:"csrf"`
+			Validity int    `json:"validity"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(body, &authResp); err != nil {
+		return fmt.Errorf("parse auth response: %w", err)
+	}
+
+	if !authResp.Session.Valid {
+		return fmt.Errorf("Pi-hole auth returned valid=false")
+	}
+
+	s.set(authResp.Session.SID, authResp.Session.CSRF, authResp.Session.Validity)
+	return nil
+}
+
+// httpGetWithSID performs a GET with X-FTL-SID and X-FTL-CSRF headers.
+func httpGetWithSID(ctx context.Context, url, sid, csrf string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if sid != "" {
+		req.Header.Set("X-FTL-SID", sid)
+		req.Header.Set("X-FTL-CSRF", csrf)
+	}
+
+	cl := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := cl.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+
+	return body, resp.StatusCode, nil
+}
+
+// --- Detection ---
 
 func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedService {
 	base := &DetectedService{
@@ -41,9 +181,7 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 	}
 
 	// Strategy 2: pihole-FTL process running (bare metal install)
-	// Use substring match — comm name might be "pihole-FTL", "pihole", etc.
 	if env.HasProcess("pihole-FTL") || env.HasProcessSubstring("pihole") {
-		// Use actual listening ports discovered from /proc/net/tcp
 		ports := env.FindProcessPorts("pihole-FTL")
 		if len(ports) == 0 {
 			ports = env.FindProcessPortsBySubstring("pihole")
@@ -57,7 +195,6 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 			}
 		}
 
-		// Fallback: read Pi-hole config files for the web port
 		if cfgPort := readPiHoleConfigPort(); cfgPort > 0 {
 			log.Printf("services: pihole config says port %d", cfgPort)
 			if url := p.probeAPI(env, []int{cfgPort}); url != "" {
@@ -67,7 +204,6 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 			}
 		}
 
-		// Last resort: common ports
 		if url := p.probeAPI(env, []int{80, 8080, 443, 8443}); url != "" {
 			base.BaseURL = url
 			log.Printf("services: pihole detected via common ports at %s", url)
@@ -77,33 +213,26 @@ func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedS
 		log.Printf("services: pihole process found but no API reachable")
 	}
 
-	// No blind probe — too many false positives without process confirmation
 	return nil
 }
 
-// probeAPI tries Pi-hole v5 and v6 API endpoints on the given ports.
 func (p *PiHolePlugin) probeAPI(env *DetectionEnv, ports []int) string {
-	// Try v5 API endpoint
 	if url := env.ProbeHTTP(ports, "/admin/api.php?summaryRaw"); url != "" {
 		return url
 	}
-	// Try v6 API endpoints (v6 restructured the entire API)
 	if url := env.ProbeHTTP(ports, "/api/dns/blocking"); url != "" {
 		return url
 	}
 	if url := env.ProbeHTTP(ports, "/api/auth"); url != "" {
 		return url
 	}
-	// Try admin page (works on both v5 and v6)
 	if url := env.ProbeHTTP(ports, "/admin/"); url != "" {
 		return url
 	}
 	return ""
 }
 
-// readPiHoleConfigPort reads Pi-hole config files to find the web interface port.
 func readPiHoleConfigPort() int {
-	// Pi-hole v6: /etc/pihole/pihole.toml — "port = "80,443s""
 	if data, err := os.ReadFile("/etc/pihole/pihole.toml"); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
@@ -111,7 +240,6 @@ func readPiHoleConfigPort() int {
 				parts := strings.SplitN(line, "=", 2)
 				val := strings.TrimSpace(parts[1])
 				val = strings.Trim(val, "\"'")
-				// port can be "80,443s" — take first number
 				portStr := strings.Split(val, ",")[0]
 				portStr = strings.TrimSuffix(portStr, "s")
 				if p, err := strconv.Atoi(strings.TrimSpace(portStr)); err == nil && p > 0 {
@@ -121,7 +249,6 @@ func readPiHoleConfigPort() int {
 		}
 	}
 
-	// Pi-hole v5: lighttpd config — "server.port = 80"
 	for _, path := range []string{"/etc/lighttpd/external.conf", "/etc/lighttpd/lighttpd.conf"} {
 		if data, err := os.ReadFile(path); err == nil {
 			for _, line := range strings.Split(string(data), "\n") {
@@ -140,6 +267,8 @@ func readPiHoleConfigPort() int {
 	return 0
 }
 
+// --- Collection ---
+
 func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*ServiceStats, error) {
 	stats := &ServiceStats{
 		PluginID: p.ID(),
@@ -148,6 +277,8 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 		Status:   "running",
 		Stats:    make(map[string]interface{}),
 	}
+
+	password := svc.Meta["password"]
 
 	// Try v5 API first
 	v5err := ""
@@ -163,9 +294,9 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 		v5err = err.Error()
 	}
 
-	// Try v6 API
+	// Try v6 API (with authentication if password is available)
 	v6err := ""
-	if data, err := p.collectV6(ctx, svc.BaseURL); err == nil {
+	if data, err := p.collectV6Authenticated(ctx, svc.BaseURL, password); err == nil {
 		stats.Summary = data.summary
 		stats.Stats = data.stats
 		stats.Status = data.status
@@ -188,8 +319,8 @@ func (p *PiHolePlugin) Collect(ctx context.Context, svc *DetectedService) (*Serv
 		return stats, nil
 	}
 
-	// If we got 401 from v6, Pi-hole is running but needs auth — return minimal stats
-	if strings.Contains(v6err, "401") {
+	// If we got 401 from v6 and have no password, signal auth required
+	if strings.Contains(v6err, "401") || strings.Contains(v6err, "authentication") {
 		if svc.Version == "" {
 			svc.Version = "v6"
 		}
@@ -214,7 +345,6 @@ type piholeData struct {
 	status  string
 }
 
-// collectV5 fetches stats from Pi-hole v5's /admin/api.php?summaryRaw endpoint.
 func (p *PiHolePlugin) collectV5(ctx context.Context, baseURL string) (*piholeData, error) {
 	body, err := HTTPGet(ctx, baseURL+"/admin/api.php?summaryRaw")
 	if err != nil {
@@ -226,7 +356,6 @@ func (p *PiHolePlugin) collectV5(ctx context.Context, baseURL string) (*piholeDa
 		return nil, err
 	}
 
-	// Validate this is actually a Pi-hole response
 	if _, ok := raw["dns_queries_today"]; !ok {
 		return nil, fmt.Errorf("not a Pi-hole response")
 	}
@@ -265,11 +394,51 @@ func (p *PiHolePlugin) collectV5(ctx context.Context, baseURL string) (*piholeDa
 	}, nil
 }
 
-// collectV6 fetches stats from Pi-hole v6's /api/stats/summary endpoint.
-func (p *PiHolePlugin) collectV6(ctx context.Context, baseURL string) (*piholeData, error) {
-	body, err := HTTPGet(ctx, baseURL+"/api/stats/summary")
+// collectV6Authenticated tries to fetch v6 stats, authenticating if needed.
+func (p *PiHolePlugin) collectV6Authenticated(ctx context.Context, baseURL, password string) (*piholeData, error) {
+	// If we have a valid session, try it first
+	if v6Session.isValid() {
+		sid, csrf := v6Session.get()
+		data, err := p.fetchV6Summary(ctx, baseURL, sid, csrf)
+		if err == nil {
+			return data, nil
+		}
+		// Session expired or invalid — clear and retry
+		log.Printf("services: pihole v6 session expired, re-authenticating")
+		v6Session.clear()
+	}
+
+	// Try without auth (Pi-hole might not require a password)
+	data, err := p.fetchV6Summary(ctx, baseURL, "", "")
+	if err == nil {
+		return data, nil
+	}
+
+	// Need auth — authenticate with password
+	if password == "" {
+		return nil, fmt.Errorf("Pi-hole v6 requires authentication (401)")
+	}
+
+	if err := v6Session.authenticate(ctx, baseURL, password); err != nil {
+		return nil, fmt.Errorf("pihole auth: %w", err)
+	}
+
+	// Retry with new session
+	sid, csrf := v6Session.get()
+	return p.fetchV6Summary(ctx, baseURL, sid, csrf)
+}
+
+// fetchV6Summary fetches /api/stats/summary with optional SID auth.
+func (p *PiHolePlugin) fetchV6Summary(ctx context.Context, baseURL, sid, csrf string) (*piholeData, error) {
+	body, statusCode, err := httpGetWithSID(ctx, baseURL+"/api/stats/summary", sid, csrf)
 	if err != nil {
 		return nil, err
+	}
+	if statusCode == 401 {
+		return nil, fmt.Errorf("HTTP 401")
+	}
+	if statusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d", statusCode)
 	}
 
 	var raw map[string]interface{}
@@ -277,7 +446,6 @@ func (p *PiHolePlugin) collectV6(ctx context.Context, baseURL string) (*piholeDa
 		return nil, err
 	}
 
-	// v6 structure differs from v5
 	queries := extractNested(raw, "queries")
 	if queries == nil {
 		return nil, fmt.Errorf("not a Pi-hole v6 response")
@@ -296,10 +464,8 @@ func (p *PiHolePlugin) collectV6(ctx context.Context, baseURL string) (*piholeDa
 	clients := extractNested(raw, "clients")
 	activeClients := toInt64(clients["active"])
 
-	piStatus := "running"
-
 	return &piholeData{
-		status: piStatus,
+		status: "running",
 		summary: []StatItem{
 			{Label: "Queries Today", Value: FormatNumber(totalQueries), Type: "number"},
 			{Label: "Blocked", Value: fmt.Sprintf("%.1f%%", blockedPercent), Type: "percent"},
@@ -312,15 +478,13 @@ func (p *PiHolePlugin) collectV6(ctx context.Context, baseURL string) (*piholeDa
 			"adsPercentToday": math.Round(blockedPercent*10) / 10,
 			"domainsBlocked":  domainsBlocked,
 			"activeClients":   activeClients,
-			"status":          piStatus,
+			"status":          "running",
 			"version":         "v6",
 		},
 	}, nil
 }
 
-// collectV6Public fetches minimal stats from Pi-hole v6's public endpoints (no auth).
 func (p *PiHolePlugin) collectV6Public(ctx context.Context, baseURL string) (*piholeData, error) {
-	// /api/dns/blocking is publicly accessible in Pi-hole v6
 	body, err := HTTPGet(ctx, baseURL+"/api/dns/blocking")
 	if err != nil {
 		return nil, err
@@ -362,7 +526,6 @@ func toInt64(v interface{}) int64 {
 		i, _ := n.Int64()
 		return i
 	case string:
-		// Pi-hole sometimes returns numbers as strings with commas
 		clean := strings.ReplaceAll(n, ",", "")
 		var i int64
 		fmt.Sscanf(clean, "%d", &i)

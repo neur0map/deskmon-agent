@@ -15,9 +15,26 @@ const (
 )
 
 type Config struct {
-	Port      int    `yaml:"port"`
-	AuthToken string `yaml:"auth_token"`
-	Bind      string `yaml:"bind"`
+	Port      int            `yaml:"port"`
+	AuthToken string         `yaml:"auth_token"`
+	Bind      string         `yaml:"bind"`
+	Services  ServicesConfig `yaml:"services,omitempty"`
+}
+
+type ServicesConfig struct {
+	PiHole PiHoleConfig `yaml:"pihole,omitempty"`
+}
+
+type PiHoleConfig struct {
+	Password string `yaml:"password,omitempty"`
+}
+
+func (cfg *Config) Save(path string) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
 }
 
 func Load(path string) (*Config, error) {

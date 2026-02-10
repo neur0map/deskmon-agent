@@ -18,11 +18,12 @@ const (
 
 // ServiceDetector runs service detection and stats collection in the background.
 type ServiceDetector struct {
-	mu           sync.RWMutex
-	detected     map[string]*DetectedService
-	cachedStats  []ServiceStats
-	dockerSocket string
-	stopCh       chan struct{}
+	mu             sync.RWMutex
+	detected       map[string]*DetectedService
+	cachedStats    []ServiceStats
+	serviceConfigs map[string]map[string]string // pluginID → key → value
+	dockerSocket   string
+	stopCh         chan struct{}
 
 	// SSE broadcast
 	Broadcast *collector.Broadcaster[[]ServiceStats]
@@ -32,11 +33,34 @@ type ServiceDetector struct {
 // for container-based detection.
 func NewServiceDetector(dockerSocket string) *ServiceDetector {
 	return &ServiceDetector{
-		detected:     make(map[string]*DetectedService),
-		dockerSocket: dockerSocket,
-		stopCh:       make(chan struct{}),
-		Broadcast:    collector.NewBroadcaster[[]ServiceStats](),
+		detected:       make(map[string]*DetectedService),
+		serviceConfigs: make(map[string]map[string]string),
+		dockerSocket:   dockerSocket,
+		stopCh:         make(chan struct{}),
+		Broadcast:      collector.NewBroadcaster[[]ServiceStats](),
 	}
+}
+
+// SetServiceConfig stores a configuration key/value for a plugin.
+// The value is injected into the DetectedService.Meta during detection.
+func (sd *ServiceDetector) SetServiceConfig(pluginID, key, value string) {
+	sd.mu.Lock()
+	defer sd.mu.Unlock()
+
+	if sd.serviceConfigs[pluginID] == nil {
+		sd.serviceConfigs[pluginID] = make(map[string]string)
+	}
+	sd.serviceConfigs[pluginID][key] = value
+
+	// Also inject into already-detected service so the next collection picks it up
+	if svc, ok := sd.detected[pluginID]; ok {
+		if svc.Meta == nil {
+			svc.Meta = make(map[string]string)
+		}
+		svc.Meta[key] = value
+	}
+
+	log.Printf("services: config set for %s: %s=<redacted>", pluginID, key)
 }
 
 // Start begins background detection and collection loops.
@@ -154,6 +178,12 @@ func (sd *ServiceDetector) runDetection() {
 			seen[p.ID()] = true
 			if _, exists := sd.detected[p.ID()]; !exists {
 				log.Printf("services: detected %s at %s", svc.Name, svc.BaseURL)
+			}
+			// Inject stored service configs into Meta
+			if cfg, ok := sd.serviceConfigs[p.ID()]; ok {
+				for k, v := range cfg {
+					svc.Meta[k] = v
+				}
 			}
 			sd.detected[p.ID()] = svc
 		} else {

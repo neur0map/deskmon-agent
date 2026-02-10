@@ -23,6 +23,7 @@ What the macOS app expects from `deskmon-agent`. This is the source of truth for
 | `POST` | `/containers/{id}/stop` | Yes | Stop a Docker container |
 | `POST` | `/containers/{id}/restart` | Yes | Restart a Docker container |
 | `POST` | `/processes/{pid}/kill` | Yes | Kill a process by PID |
+| `POST` | `/services/{pluginId}/configure` | Yes | Set service credentials (e.g. Pi-hole password) |
 | `POST` | `/agent/restart` | Yes | Restart agent via systemd |
 | `POST` | `/agent/stop` | Yes | Stop agent via systemd |
 | `GET` | `/agent/status` | Yes | Agent version and service state |
@@ -379,6 +380,54 @@ Kill a process by PID (sends SIGTERM).
 {
   "message": "killed"
 }
+```
+
+---
+
+## POST /services/{pluginId}/configure
+
+Configure credentials for a detected service. Currently used for Pi-hole v6 password authentication.
+
+**Request** `POST /services/pihole/configure`
+
+```json
+{
+  "password": "your-pihole-password"
+}
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "message": "configured"
+}
+```
+
+The agent stores the password in its config file (`/etc/deskmon/config.yaml`) and uses it to authenticate with the Pi-hole v6 API on the next collection cycle. The password persists across agent restarts.
+
+### Pi-hole v6 Authentication Flow
+
+Pi-hole v6 requires session-based authentication for detailed stats:
+
+1. Agent sends `POST /api/auth` to Pi-hole with the password
+2. Pi-hole returns a session ID (SID) valid for ~5 minutes
+3. Agent uses `X-FTL-SID` header on subsequent API requests
+4. Sessions auto-renew on each successful request
+5. On session expiry (401), agent re-authenticates automatically
+
+If no password is configured, the agent returns `authRequired: true` in the Pi-hole service stats, and the macOS app shows a password prompt.
+
+### Agent Config
+
+Pi-hole password can also be set directly in `/etc/deskmon/config.yaml`:
+
+```yaml
+port: 7654
+auth_token: "your-agent-token"
+services:
+  pihole:
+    password: "your-pihole-password"
 ```
 
 ---

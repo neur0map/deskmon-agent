@@ -18,6 +18,7 @@ import (
 
 type Server struct {
 	cfg          *config.Config
+	configPath   string
 	system       *collector.SystemCollector
 	docker       *collector.DockerCollector
 	services     *services.ServiceDetector
@@ -40,9 +41,10 @@ const (
 	maxBodySize  = 1024 // 1KB
 )
 
-func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, svcDetector *services.ServiceDetector, version string) *Server {
+func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, svcDetector *services.ServiceDetector, version, configPath string) *Server {
 	return &Server{
 		cfg:          cfg,
+		configPath:   configPath,
 		system:       system,
 		docker:       docker,
 		services:     svcDetector,
@@ -80,6 +82,9 @@ func (s *Server) Start() error {
 
 	// Process action endpoints
 	mux.HandleFunc("POST /processes/{pid}/kill", s.authMiddleware(s.handleProcessKill))
+
+	// Service configuration endpoints
+	mux.HandleFunc("POST /services/{pluginId}/configure", s.authMiddleware(s.handleServiceConfigure))
 
 	handler := s.rateLimitMiddleware(s.securityHeaders(mux))
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/neur0map/deskmon-agent/internal/collector"
+	"github.com/neur0map/deskmon-agent/internal/collector/services"
 	"github.com/neur0map/deskmon-agent/internal/config"
 )
 
@@ -18,7 +19,8 @@ func newTestServer(authToken string) *Server {
 	}
 	sys := collector.NewSystemCollector()
 	docker := collector.NewDockerCollector("/var/run/docker.sock")
-	return NewServer(cfg, sys, docker, "test")
+	svcDetector := services.NewServiceDetector("/var/run/docker.sock")
+	return NewServer(cfg, sys, docker, svcDetector, "test", "")
 }
 
 func TestHealthEndpoint(t *testing.T) {
