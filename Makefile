@@ -22,6 +22,17 @@ else
   GOARCH := $(UNAME_M)
 endif
 
+# Find Go binary — check PATH, then common install locations
+# sudo doesn't inherit user PATH, so we search manually
+GO := $(shell command -v go 2>/dev/null \
+	|| (test -x /usr/local/go/bin/go && echo /usr/local/go/bin/go) \
+	|| (test -x /usr/lib/go/bin/go && echo /usr/lib/go/bin/go) \
+	|| (test -x /snap/go/current/bin/go && echo /snap/go/current/bin/go) \
+	|| (test -x /home/*/go/bin/go && echo /home/*/go/bin/go) \
+	|| (test -x $(HOME)/go/bin/go && echo $(HOME)/go/bin/go) \
+	|| (test -x /opt/homebrew/bin/go && echo /opt/homebrew/bin/go) \
+	|| echo "")
+
 # ─────────────────────────────────────────────
 # Setup: one command to build and install
 # Usage: sudo make setup
@@ -42,9 +53,24 @@ setup:
 		echo "  Or:  sudo make setup PORT=9090"; \
 		exit 1; \
 	fi
+	@if [ -z "$(GO)" ]; then \
+		echo "Error: Go is not installed"; \
+		echo ""; \
+		echo "Install Go with one of:"; \
+		echo "  Ubuntu/Debian: sudo apt install golang-go"; \
+		echo "  Fedora/RHEL:   sudo dnf install golang"; \
+		echo "  Arch:          sudo pacman -S go"; \
+		echo "  Manual:        https://go.dev/dl/"; \
+		echo ""; \
+		echo "Or cross-compile from another machine:"; \
+		echo "  make package-amd64"; \
+		echo "  make package-arm64"; \
+		exit 1; \
+	fi
 	@echo "Detected: Linux $(UNAME_M) ($(GOARCH))"
+	@echo "Go found: $(GO) ($$($(GO) version 2>/dev/null | awk '{print $$3}'))"
 	@echo "Building $(BINARY) v$(VERSION)..."
-	go build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/deskmon-agent
+	$(GO) build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/deskmon-agent
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY)"
 	@echo ""
 	./scripts/install.sh --binary $(BUILD_DIR)/$(BINARY) --port $(PORT)
@@ -61,13 +87,13 @@ uninstall:
 # Development targets
 # ─────────────────────────────────────────────
 build:
-	go build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/deskmon-agent
+	$(or $(GO),go) build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/deskmon-agent
 
 build-linux-amd64:
-	GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 ./cmd/deskmon-agent
+	GOOS=linux GOARCH=amd64 $(or $(GO),go) build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 ./cmd/deskmon-agent
 
 build-linux-arm64:
-	GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY)-linux-arm64 ./cmd/deskmon-agent
+	GOOS=linux GOARCH=arm64 $(or $(GO),go) build -ldflags "-X main.Version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY)-linux-arm64 ./cmd/deskmon-agent
 
 build-all: build-linux-amd64 build-linux-arm64
 
@@ -98,7 +124,7 @@ clean:
 	rm -rf $(BUILD_DIR) $(DIST_DIR)
 
 test:
-	go test -v ./...
+	$(or $(GO),go) test -v ./...
 
 run:
-	go run ./cmd/deskmon-agent
+	$(or $(GO),go) run ./cmd/deskmon-agent
