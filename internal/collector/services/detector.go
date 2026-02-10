@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/neur0map/deskmon-agent/internal/collector"
 )
 
 const (
@@ -21,6 +23,9 @@ type ServiceDetector struct {
 	cachedStats  []ServiceStats
 	dockerSocket string
 	stopCh       chan struct{}
+
+	// SSE broadcast
+	Broadcast *collector.Broadcaster[[]ServiceStats]
 }
 
 // NewServiceDetector creates a detector that will use the given Docker socket
@@ -30,6 +35,7 @@ func NewServiceDetector(dockerSocket string) *ServiceDetector {
 		detected:     make(map[string]*DetectedService),
 		dockerSocket: dockerSocket,
 		stopCh:       make(chan struct{}),
+		Broadcast:    collector.NewBroadcaster[[]ServiceStats](),
 	}
 }
 
@@ -241,4 +247,9 @@ func (sd *ServiceDetector) runCollection() {
 	sd.mu.Lock()
 	sd.cachedStats = stats
 	sd.mu.Unlock()
+
+	// Broadcast to SSE subscribers
+	broadcast := make([]ServiceStats, len(stats))
+	copy(broadcast, stats)
+	sd.Broadcast.Send(broadcast)
 }

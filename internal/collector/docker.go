@@ -45,6 +45,9 @@ type DockerCollector struct {
 	mu         sync.RWMutex
 	cached     []ContainerStats
 	stopCh     chan struct{}
+
+	// SSE broadcast
+	Broadcast *Broadcaster[[]ContainerStats]
 }
 
 func NewDockerCollector(socketPath string) *DockerCollector {
@@ -52,6 +55,7 @@ func NewDockerCollector(socketPath string) *DockerCollector {
 		socketPath: socketPath,
 		cached:     []ContainerStats{},
 		stopCh:     make(chan struct{}),
+		Broadcast:  NewBroadcaster[[]ContainerStats](),
 	}
 }
 
@@ -153,6 +157,11 @@ func (dc *DockerCollector) refresh() {
 	dc.mu.Lock()
 	dc.cached = results
 	dc.mu.Unlock()
+
+	// Broadcast to SSE subscribers
+	broadcast := make([]ContainerStats, len(results))
+	copy(broadcast, results)
+	dc.Broadcast.Send(broadcast)
 }
 
 func (dc *DockerCollector) fillRunningStats(ctx context.Context, cli *client.Client, containerID string, cs *ContainerStats) {

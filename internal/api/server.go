@@ -66,6 +66,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /stats/processes", s.authMiddleware(s.handleProcessStats))
 	mux.HandleFunc("GET /stats/services", s.authMiddleware(s.handleServiceStats))
 	mux.HandleFunc("GET /stats/services/debug", s.authMiddleware(s.handleServiceDebug))
+	mux.HandleFunc("GET /stats/stream", s.authMiddleware(s.handleStatsStream))
 
 	// Agent control endpoints
 	mux.HandleFunc("POST /agent/restart", s.authMiddleware(s.handleAgentRestart))

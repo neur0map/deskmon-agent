@@ -71,6 +71,12 @@ type netSample struct {
 	timestamp time.Time
 }
 
+// SystemEvent is the payload broadcast each time system stats are sampled.
+type SystemEvent struct {
+	System    SystemStats   `json:"system"`
+	Processes []ProcessInfo `json:"processes"`
+}
+
 type SystemCollector struct {
 	mu          sync.RWMutex
 	cpuUsage    float64
@@ -86,6 +92,9 @@ type SystemCollector struct {
 	smoothedCPU  map[int32]float64 // EMA-smoothed CPU per process
 	topProcesses []ProcessInfo
 	totalMemKB   uint64
+
+	// SSE broadcast
+	Broadcast *Broadcaster[SystemEvent]
 }
 
 func NewSystemCollector() *SystemCollector {
@@ -93,6 +102,7 @@ func NewSystemCollector() *SystemCollector {
 		stopCh:      make(chan struct{}),
 		prevProcCPU: make(map[int32]processCPUSample),
 		smoothedCPU: make(map[int32]float64),
+		Broadcast:   NewBroadcaster[SystemEvent](),
 	}
 	sc.coreCount = countCPUCores()
 	sc.totalMemKB = readTotalMemKB()
@@ -147,7 +157,38 @@ func (sc *SystemCollector) sample() {
 	// Process sampling
 	sc.sampleProcesses()
 
+	// Snapshot for broadcast while holding the lock
+	cpuUsage := sc.cpuUsage
+	download := sc.netDownload
+	upload := sc.netUpload
+	procs := make([]ProcessInfo, len(sc.topProcesses))
+	copy(procs, sc.topProcesses)
+
 	sc.mu.Unlock()
+
+	// Broadcast full system snapshot (non-blocking)
+	mem := readMemory()
+	disk := readDisk()
+	temp := readTemperature()
+	uptime := readUptime()
+
+	sc.Broadcast.Send(SystemEvent{
+		System: SystemStats{
+			CPU: CPUStats{
+				UsagePercent: cpuUsage,
+				CoreCount:    sc.coreCount,
+				Temperature:  temp,
+			},
+			Memory:  mem,
+			Disk:    disk,
+			Network: NetworkStats{
+				DownloadBytesPerSec: download,
+				UploadBytesPerSec:   upload,
+			},
+			Uptime: uptime,
+		},
+		Processes: procs,
+	})
 }
 
 func (sc *SystemCollector) Collect() SystemStats {
