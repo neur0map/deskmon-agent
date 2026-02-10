@@ -116,11 +116,15 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// Limit request body size
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 
-		// Strip server fingerprinting
-		w.Header().Set("Content-Type", "application/json")
+		// SSE streams set their own headers; skip JSON/no-store defaults
+		// that interfere with streaming (Content-Type conflict, cache policy).
+		if r.URL.Path != "/stats/stream" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+		}
+
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Cache-Control", "no-store")
 
 		next.ServeHTTP(w, r)
 	})
