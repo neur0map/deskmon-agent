@@ -15,6 +15,14 @@ What the macOS app expects from `deskmon-agent`. This is the source of truth for
 | `GET` | `/stats` | Yes | Full system + container stats |
 | `GET` | `/stats/system` | Yes | System stats only |
 | `GET` | `/stats/docker` | Yes | Docker container stats only |
+| `GET` | `/stats/processes` | Yes | Top processes by CPU |
+| `GET` | `/stats/services` | Yes | Detected service stats |
+| `GET` | `/stats/services/debug` | Yes | Service detection diagnostics |
+| `GET` | `/stats/stream` | Yes | SSE stream of live stats |
+| `POST` | `/containers/{id}/start` | Yes | Start a Docker container |
+| `POST` | `/containers/{id}/stop` | Yes | Stop a Docker container |
+| `POST` | `/containers/{id}/restart` | Yes | Restart a Docker container |
+| `POST` | `/processes/{pid}/kill` | Yes | Kill a process by PID |
 | `POST` | `/agent/restart` | Yes | Restart agent via systemd |
 | `POST` | `/agent/stop` | Yes | Stop agent via systemd |
 | `GET` | `/agent/status` | Yes | Agent version and service state |
@@ -39,7 +47,7 @@ This handshake runs:
 - **AddServerSheet** — "Connect" button runs handshake before saving. Token is required.
 - **EditServerSheet** — Re-verifies only if host/port/token changed. Name-only edits skip.
 - **DashboardView inline edit** — Same pattern via `testAndSaveEdit()`.
-- **Polling loop** — `refreshData()` uses the same handshake. 401 sets `.unauthorized`, unreachable sets `.offline`.
+- **SSE stream** — On connect/reconnect, the app does a full `GET /stats` fetch, then opens `GET /stats/stream` for live updates. 401 sets `.unauthorized`, unreachable sets `.offline`.
 
 ### Agent Requirements
 
@@ -293,10 +301,90 @@ The agent does not send a status field. The app computes it.
 
 ---
 
-## Future Fields (Not Yet Required)
+## GET /stats/stream (SSE)
 
-- `containers[].ports` — Array of port mappings
+Server-Sent Events endpoint for live stats. The macOS app opens a persistent connection and receives events as they're produced by the agent's background collectors.
+
+**Headers:** `Content-Type: text/event-stream`
+
+**Auth:** Same `Authorization: Bearer <token>` header as other endpoints.
+
+### Event Types
+
+**`system`** — Fires every **1 second**. Contains system stats + top processes.
+
+```
+event: system
+data: {"system":{"cpu":{"usagePercent":42.5,...},"memory":{...},...},"processes":[...]}
+```
+
+**`docker`** — Fires every **5 seconds**. Contains all container stats.
+
+```
+event: docker
+data: [{"id":"a1b2c3","name":"pihole","status":"running",...},...]
+```
+
+**`services`** — Fires every **10 seconds**. Contains detected service stats.
+
+```
+event: services
+data: [{"pluginId":"pihole","name":"Pi-hole","status":"running",...},...]
+```
+
+**Keepalive** — Comment line every **30 seconds** to prevent proxy timeouts.
+
+```
+: keepalive
+```
+
+### Connection Lifecycle
+
+1. App opens `GET /stats/stream` with Bearer auth
+2. Agent validates token (401 if invalid)
+3. Agent holds connection open, streams events
+4. On disconnect (network, proxy timeout, agent restart), app reconnects with exponential backoff (2s → 4s → 8s → max 30s)
+5. On reconnect, app does a full `GET /stats` fetch first to fill UI, then reopens the stream
+
+### Proxy Compatibility
+
+- `X-Accel-Buffering: no` header disables nginx/reverse proxy buffering
+- `Cache-Control: no-cache` prevents intermediate caching
+- 30s keepalive pings prevent Cloudflare tunnel idle timeouts (~100s)
+- Server's WriteTimeout is disabled for this endpoint
+
+---
+
+## Container & Process Actions
+
+### POST /containers/{id}/start|stop|restart
+
+Control Docker containers. Returns a message on success.
+
+**Response** `200 OK`
+
+```json
+{
+  "message": "started"
+}
+```
+
+### POST /processes/{pid}/kill
+
+Kill a process by PID (sends SIGTERM).
+
+**Response** `200 OK`
+
+```json
+{
+  "message": "killed"
+}
+```
+
+---
+
+## Implemented Container Fields
+
+- `containers[].ports` — Array of port mappings `[{"hostPort": 8080, "containerPort": 80, "protocol": "tcp"}]`
 - `containers[].restartCount` — Number of container restarts
 - `containers[].healthStatus` — `"healthy"`, `"unhealthy"`, `"starting"`, `"none"`
-- `containers[].healthLog` — Last health check output string
-- WebSocket endpoint (`/ws`) for log streaming and container actions

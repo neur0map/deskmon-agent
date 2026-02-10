@@ -18,9 +18,9 @@ Single binary. One-command install. Set it and forget it.
 │  ┌───────────────────────────────────────────────────┐  │
 │  │         Deskmon macOS App (SwiftUI)               │  │
 │  │                                                   │  │
-│  │  Polls agents at your configured interval (3s).   │  │
+│  │  Connects via SSE for live streaming stats.        │  │
 │  │  Renders CPU, RAM, disk, network, containers.     │  │
-│  │  Controls agent: restart, stop.                   │  │
+│  │  Controls agent: restart, stop, container mgmt.   │  │
 │  └───────────────────────────────────────────────────┘  │
 └───────────────────────┬─────────────────────────────────┘
                         │ HTTP (Bearer token auth)
@@ -133,7 +133,7 @@ Once running, the macOS app shows live stats for each server:
 - **Uptime** — Time since last boot
 - **Docker containers** — Per-container CPU, memory, network, block I/O, PIDs, status
 
-The agent's background sampler ticks every 1 second, so data is always fresh regardless of your polling interval.
+The agent streams live updates via Server-Sent Events (SSE): system stats every 1s, Docker every 5s, services every 10s.
 
 ---
 
@@ -147,6 +147,13 @@ All endpoints except `/health` require `Authorization: Bearer <token>`.
 | `GET` | `/stats` | Full system + Docker container stats |
 | `GET` | `/stats/system` | System stats only (no Docker overhead) |
 | `GET` | `/stats/docker` | Docker container stats only |
+| `GET` | `/stats/processes` | Top processes by CPU |
+| `GET` | `/stats/services` | Detected service stats (Pi-hole, Traefik, etc.) |
+| `GET` | `/stats/stream` | **SSE stream** — live updates (system 1s, docker 5s, services 10s) |
+| `POST` | `/containers/{id}/start` | Start a Docker container |
+| `POST` | `/containers/{id}/stop` | Stop a Docker container |
+| `POST` | `/containers/{id}/restart` | Restart a Docker container |
+| `POST` | `/processes/{pid}/kill` | Kill a process by PID |
 | `POST` | `/agent/restart` | Restart agent via systemd |
 | `POST` | `/agent/stop` | Stop agent via systemd |
 | `GET` | `/agent/status` | Agent version and service state |
@@ -214,9 +221,10 @@ sudo systemctl restart deskmon-agent
 
 The macOS app can control the agent remotely:
 
-- **Restart Agent** — Sends `POST /agent/restart`. Agent restarts via systemd (~5 seconds). You'll see a brief offline status, then it comes back.
-- **Polling toggle** — Turns HTTP polling on/off from the app side. Agent keeps running either way.
-- **Refresh interval** — Controls how often the app hits `/stats` (e.g. 3s, 5s, 10s).
+- **Restart Agent** — Sends `POST /agent/restart`. Agent restarts via systemd (~5 seconds). The app auto-reconnects.
+- **Live connection** — The app connects via SSE (`GET /stats/stream`) for real-time updates. No polling needed.
+- **Container management** — Start, stop, restart Docker containers from the app.
+- **Process management** — Kill processes by PID from the app.
 
 The agent auto-recovers from crashes (systemd `Restart=always`) and starts automatically on server reboot.
 
@@ -281,11 +289,22 @@ deskmon-agent/
 │   ├── api/
 │   │   ├── server.go        # HTTP server, auth, rate limiting
 │   │   ├── handlers.go      # /health, /stats handlers
+│   │   ├── stream.go        # SSE streaming endpoint
 │   │   ├── control.go       # /agent/* control handlers
+│   │   ├── containers.go    # Container action handlers
+│   │   ├── processes.go     # Process kill handler
 │   │   └── server_test.go   # API tests
 │   ├── collector/
 │   │   ├── system.go        # CPU, memory, disk, network, temp, uptime
-│   │   └── docker.go        # Container stats via Docker SDK
+│   │   ├── docker.go        # Container stats via Docker SDK
+│   │   ├── broadcast.go     # Generic pub/sub broadcaster for SSE
+│   │   └── services/        # Auto-detected service plugins
+│   │       ├── detector.go  # Background detection + collection
+│   │       ├── registry.go  # Plugin registry
+│   │       ├── helpers.go   # Detection env, HTTP probing
+│   │       ├── pihole.go    # Pi-hole v5/v6 plugin
+│   │       ├── traefik.go   # Traefik plugin
+│   │       └── nginx.go     # Nginx plugin
 │   ├── config/
 │   │   ├── config.go        # YAML config loader
 │   │   └── config_test.go   # Config tests
