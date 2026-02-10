@@ -153,6 +153,7 @@ func (sd *ServiceDetector) Collect() []ServiceStats {
 }
 
 // runDetection scans for services using all registered plugins.
+// Network probes run without holding the lock so SetServiceConfig is not blocked.
 func (sd *ServiceDetector) runDetection() {
 	plugins := RegisteredPlugins()
 	if len(plugins) == 0 {
@@ -166,29 +167,38 @@ func (sd *ServiceDetector) runDetection() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	sd.mu.Lock()
-	defer sd.mu.Unlock()
-
-	// Track which plugins still detect their service
-	seen := make(map[string]bool)
-
+	// Run detection without holding the lock (network I/O happens here)
+	newDetected := make(map[string]*DetectedService)
 	for _, p := range plugins {
 		svc := p.Detect(ctx, env)
 		if svc != nil {
-			seen[p.ID()] = true
-			if _, exists := sd.detected[p.ID()]; !exists {
-				log.Printf("services: detected %s at %s", svc.Name, svc.BaseURL)
-			}
-			// Inject stored service configs into Meta
-			if cfg, ok := sd.serviceConfigs[p.ID()]; ok {
-				for k, v := range cfg {
-					svc.Meta[k] = v
-				}
-			}
-			sd.detected[p.ID()] = svc
+			newDetected[p.ID()] = svc
 		} else {
 			log.Printf("services: plugin %s did not detect a service", p.ID())
 		}
+	}
+
+	// Brief lock to merge results
+	sd.mu.Lock()
+	defer sd.mu.Unlock()
+
+	seen := make(map[string]bool, len(newDetected))
+	for id, svc := range newDetected {
+		seen[id] = true
+		if _, exists := sd.detected[id]; !exists {
+			log.Printf("services: detected %s at %s", svc.Name, svc.BaseURL)
+		}
+		// Inject stored service configs into Meta
+		if cfg, ok := sd.serviceConfigs[id]; ok {
+			for k, v := range cfg {
+				svc.Meta[k] = v
+			}
+		}
+		// Preserve version from previous detection if new one is empty
+		if prev, exists := sd.detected[id]; exists && svc.Version == "" {
+			svc.Version = prev.Version
+		}
+		sd.detected[id] = svc
 	}
 
 	// Remove services that are no longer detected
