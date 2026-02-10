@@ -3,22 +3,55 @@
 What the macOS app expects from `deskmon-agent`. This is the source of truth for the JSON shapes the Swift client will decode.
 
 **Default port:** `7654`
-**Auth:** Optional `Authorization: Bearer <token>` header
+**Auth:** `Authorization: Bearer <token>` header (required on all endpoints except `/health`)
 
 ---
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Simple health check |
-| `GET` | `/stats` | Full payload (system + containers) |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | No | Reachability check |
+| `GET` | `/stats` | Yes | Full system + container stats |
+| `GET` | `/stats/system` | Yes | System stats only |
+| `GET` | `/stats/docker` | Yes | Docker container stats only |
+| `POST` | `/agent/restart` | Yes | Restart agent via systemd |
+| `POST` | `/agent/stop` | Yes | Stop agent via systemd |
+| `GET` | `/agent/status` | Yes | Agent version and service state |
+
+---
+
+## Auth Handshake Flow
+
+The macOS app uses a two-step verification when connecting to a server:
+
+```
+Step 1: GET /health  (no auth)
+        ├─ No response / timeout → server.status = .offline
+        └─ 200 OK → server is reachable, proceed to step 2
+
+Step 2: GET /stats   (Bearer token)
+        ├─ 401 Unauthorized → server.status = .unauthorized
+        └─ 200 OK → server.status = .healthy (connection verified)
+```
+
+This handshake runs:
+- **AddServerSheet** — "Connect" button runs handshake before saving. Token is required.
+- **EditServerSheet** — Re-verifies only if host/port/token changed. Name-only edits skip.
+- **DashboardView inline edit** — Same pattern via `testAndSaveEdit()`.
+- **Polling loop** — `refreshData()` uses the same handshake. 401 sets `.unauthorized`, unreachable sets `.offline`.
+
+### Agent Requirements
+
+- `/health` must **never** require auth — the app uses it to distinguish "offline" from "unauthorized"
+- `/stats` must return exactly `401` (not 403, not 200 with error body) when the token is wrong
+- 401 response should have an empty body — the app only checks the HTTP status code
 
 ---
 
 ## GET /health
 
-Lightweight check to determine if the agent is reachable.
+Lightweight check to determine if the agent is reachable. No auth required.
 
 **Response** `200 OK`
 
@@ -27,8 +60,6 @@ Lightweight check to determine if the agent is reachable.
   "status": "ok"
 }
 ```
-
-The macOS app uses this to determine server status (healthy vs offline). A non-200 or timeout = offline.
 
 ---
 
@@ -40,24 +71,26 @@ Full system stats and Docker container stats in a single response.
 
 ```json
 {
-  "cpu": {
-    "usagePercent": 42.5,
-    "coreCount": 8,
-    "temperature": 64.7
+  "system": {
+    "cpu": {
+      "usagePercent": 42.5,
+      "coreCount": 8,
+      "temperature": 64.7
+    },
+    "memory": {
+      "usedBytes": 22548578304,
+      "totalBytes": 34359738368
+    },
+    "disk": {
+      "usedBytes": 279172874240,
+      "totalBytes": 536870912000
+    },
+    "network": {
+      "downloadBytesPerSec": 13631488.0,
+      "uploadBytesPerSec": 3145728.0
+    },
+    "uptimeSeconds": 1048962
   },
-  "memory": {
-    "usedBytes": 22548578304,
-    "totalBytes": 34359738368
-  },
-  "disk": {
-    "usedBytes": 279172874240,
-    "totalBytes": 536870912000
-  },
-  "network": {
-    "downloadBytesPerSec": 13631488.0,
-    "uploadBytesPerSec": 3145728.0
-  },
-  "uptimeSeconds": 1048962,
   "containers": [
     {
       "id": "a1b2c3d4e5f6",
@@ -78,7 +111,75 @@ Full system stats and Docker container stats in a single response.
 }
 ```
 
-If Docker is not installed or the socket is unavailable, `containers` should be an empty array `[]`.
+**Error responses:**
+
+| Status | Meaning |
+|--------|---------|
+| `401 Unauthorized` | Missing or invalid Bearer token (empty body) |
+| `429 Too Many Requests` | Rate limit exceeded (60/min per IP) |
+
+If Docker is not installed or the socket is unavailable, `containers` is an empty array `[]`.
+
+---
+
+## GET /stats/system
+
+System stats only, without Docker overhead.
+
+**Response** `200 OK` — same as `stats.system` above.
+
+---
+
+## GET /stats/docker
+
+Docker container stats only.
+
+**Response** `200 OK` — same as `stats.containers` above (array).
+
+---
+
+## POST /agent/restart
+
+Restart the agent via systemd. The agent responds before restarting.
+
+**Response** `200 OK`
+
+```json
+{
+  "message": "restarting"
+}
+```
+
+The agent process dies and systemd brings it back (~5 seconds). The macOS app will see a brief offline status, then `/health` returns and the green dot comes back.
+
+---
+
+## POST /agent/stop
+
+Stop the agent via systemd. The agent responds before stopping.
+
+**Response** `200 OK`
+
+```json
+{
+  "message": "stopping"
+}
+```
+
+After stopping, the agent is unreachable. The macOS app will show `.offline`.
+
+---
+
+## GET /agent/status
+
+**Response** `200 OK`
+
+```json
+{
+  "version": "0.1.0",
+  "status": "active"
+}
+```
 
 ---
 
@@ -101,22 +202,21 @@ If Docker is not installed or the socket is unavailable, `containers` should be 
 
 ### CPU Usage Calculation
 
-The agent should compute `usagePercent` by sampling `/proc/stat` (or equivalent) at two points and calculating the delta:
+The agent computes `usagePercent` by sampling `/proc/stat` at 1-second intervals and calculating the delta:
 
 ```
-usage = (delta_user + delta_system + delta_nice + delta_irq + delta_softirq + delta_steal)
-        / (delta_total) * 100
+usage = (delta_total - delta_idle) / delta_total * 100
 ```
 
-This must be computed server-side. The macOS app does not do this calculation.
+This runs in a background goroutine. The API always returns the latest computed value.
 
 ### Network Speed Calculation
 
-The agent should compute bytes-per-second by sampling `/proc/net/dev` (or equivalent) and dividing the byte delta by the time delta between samples. The app expects instantaneous speed, not cumulative totals.
+The agent computes bytes-per-second by sampling `/proc/net/dev` at 1-second intervals and dividing the byte delta by the time delta. The app expects instantaneous speed, not cumulative totals.
 
 ### Temperature
 
-Read from `/sys/class/thermal/thermal_zone*/temp` or `sensors` equivalent. Return `0` if not available (some VMs/containers won't have this). The value should be in Celsius, not millidegrees.
+Read from `/sys/class/thermal/thermal_zone*/temp`. Returns the highest value across all zones. Divided by 1000 (kernel reports millidegrees). Returns `0` if not available.
 
 ---
 
@@ -140,15 +240,13 @@ Read from `/sys/class/thermal/thermal_zone*/temp` or `sensors` equivalent. Retur
 
 ### Container CPU Calculation
 
-Docker's `/containers/{id}/stats` returns cumulative CPU nanoseconds. The agent must track the previous sample and compute:
+Docker provides `PreCPUStats` (previous sample) in each stats response. The agent calculates:
 
 ```
 cpuPercent = (delta_container_cpu / delta_system_cpu) * numCores * 100
 ```
 
 ### Container Status Mapping
-
-Map Docker's container state to one of three values:
 
 | Docker State | Agent Value |
 |-------------|-------------|
@@ -161,55 +259,43 @@ Map Docker's container state to one of three values:
 
 ISO 8601 with timezone: `"2025-01-15T08:30:00Z"`
 
-The macOS app decodes this with `ISO8601DateFormatter` and computes uptime client-side. Send `null` (not an empty string) for stopped containers.
+The macOS app decodes this with `ISO8601DateFormatter` and computes uptime client-side.
 
 ---
 
 ## Server Status Derivation
 
-The macOS app determines server status from the stats response:
+The macOS app determines server status from the connection state and stats response:
 
-| Condition | Status |
-|-----------|--------|
-| No response / timeout | `offline` |
-| CPU > 90% OR Memory > 95% | `critical` |
-| CPU > 75% OR Memory > 85% | `warning` |
-| Otherwise | `healthy` |
+| Condition | Status | Icon |
+|-----------|--------|------|
+| No response / timeout | `.offline` | — |
+| `/health` OK but `/stats` returns 401 | `.unauthorized` | Lock, orange |
+| CPU > 90% OR Memory > 95% | `.critical` | Red |
+| CPU > 75% OR Memory > 85% | `.warning` | Yellow |
+| Otherwise | `.healthy` | Green |
 
-The agent does not need to send a status field. The app computes it.
+The agent does not send a status field. The app computes it.
 
 ---
 
 ## Error Handling
 
-| Scenario | Expected Behavior |
-|----------|-------------------|
-| Agent unreachable | App shows server as `offline` |
-| Docker not installed | Return `"containers": []` |
-| Docker socket permission denied | Return `"containers": []` |
-| Temperature unavailable | Return `"temperature": 0` |
-| Container memory unlimited | Return `"memoryLimitMB": 0` |
-
----
-
-## Auth
-
-If the user configures a token in the macOS app, it sends:
-
-```
-GET /stats HTTP/1.1
-Authorization: Bearer <token>
-```
-
-The agent should return `401 Unauthorized` if a token is configured on the agent side and the request doesn't match. If no token is configured on the agent, accept all requests.
+| Scenario | Agent Response | App Behavior |
+|----------|---------------|-------------|
+| Agent unreachable | No response | `.offline` |
+| Wrong/missing Bearer token | `401` (empty body) | `.unauthorized` |
+| Rate limit exceeded | `429` | Retries after backoff |
+| Docker not installed | `containers: []` | Shows empty container list |
+| Docker socket denied | `containers: []` | Shows empty container list |
+| Temperature unavailable | `temperature: 0` | Shows 0 or hides |
+| Container memory unlimited | `memoryLimitMB: 0` | Shows as unlimited |
 
 ---
 
 ## Future Fields (Not Yet Required)
 
-These are planned but not currently rendered in the UI. Do not implement yet.
-
-- `containers[].ports` — Array of port mappings `[{"host": 8080, "container": 80, "protocol": "tcp"}]`
+- `containers[].ports` — Array of port mappings
 - `containers[].restartCount` — Number of container restarts
 - `containers[].healthStatus` — `"healthy"`, `"unhealthy"`, `"starting"`, `"none"`
 - `containers[].healthLog` — Last health check output string
