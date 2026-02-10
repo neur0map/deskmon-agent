@@ -68,7 +68,7 @@ func (s *Server) Start() error {
 		Addr:              addr,
 		Handler:           handler,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 13, // 8KB
 	}
