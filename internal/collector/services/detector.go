@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -137,6 +138,29 @@ func (sd *ServiceDetector) DebugInfo() DebugSnapshot {
 		Detected:     detected,
 		Stats:        stats,
 	}
+}
+
+// PerformAction delegates an action to the appropriate service plugin.
+func (sd *ServiceDetector) PerformAction(ctx context.Context, pluginID, action string, params map[string]interface{}) (string, error) {
+	sd.mu.RLock()
+	svc, ok := sd.detected[pluginID]
+	sd.mu.RUnlock()
+
+	if !ok {
+		return "", fmt.Errorf("service %s not detected", pluginID)
+	}
+
+	for _, p := range RegisteredPlugins() {
+		if p.ID() == pluginID {
+			ap, ok := p.(ServiceActionPlugin)
+			if !ok {
+				return "", fmt.Errorf("service %s does not support actions", pluginID)
+			}
+			return ap.PerformAction(ctx, svc, action, params)
+		}
+	}
+
+	return "", fmt.Errorf("plugin %s not found", pluginID)
 }
 
 // Collect returns the latest cached service stats.

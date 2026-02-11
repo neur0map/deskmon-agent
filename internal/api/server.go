@@ -83,8 +83,9 @@ func (s *Server) Start() error {
 	// Process action endpoints
 	mux.HandleFunc("POST /processes/{pid}/kill", s.authMiddleware(s.handleProcessKill))
 
-	// Service configuration endpoints
+	// Service configuration and action endpoints
 	mux.HandleFunc("POST /services/{pluginId}/configure", s.authMiddleware(s.handleServiceConfigure))
+	mux.HandleFunc("POST /services/{pluginId}/action", s.authMiddleware(s.handleServiceAction))
 
 	handler := s.rateLimitMiddleware(s.securityHeaders(mux))
 

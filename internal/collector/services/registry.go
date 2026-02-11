@@ -17,6 +17,12 @@ type ServicePlugin interface {
 	Collect(ctx context.Context, svc *DetectedService) (*ServiceStats, error)
 }
 
+// ServiceActionPlugin is an optional interface for plugins that support actions.
+type ServiceActionPlugin interface {
+	ServicePlugin
+	PerformAction(ctx context.Context, svc *DetectedService, action string, params map[string]interface{}) (string, error)
+}
+
 // DetectedService holds information about a discovered service instance.
 type DetectedService struct {
 	PluginID string

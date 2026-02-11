@@ -160,6 +160,46 @@ func httpGetWithSID(ctx context.Context, url, sid, csrf string) ([]byte, int, er
 	return body, resp.StatusCode, nil
 }
 
+// httpRequestWithSID performs any method with X-FTL-SID and X-FTL-CSRF headers.
+func httpRequestWithSID(ctx context.Context, method, url string, jsonBody []byte, sid, csrf string) ([]byte, int, error) {
+	var bodyReader io.Reader
+	if jsonBody != nil {
+		bodyReader = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, 0, err
+	}
+	if jsonBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if sid != "" {
+		req.Header.Set("X-FTL-SID", sid)
+		req.Header.Set("X-FTL-CSRF", csrf)
+	}
+
+	cl := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := cl.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+
+	return body, resp.StatusCode, nil
+}
+
 // --- Detection ---
 
 func (p *PiHolePlugin) Detect(ctx context.Context, env *DetectionEnv) *DetectedService {
@@ -468,8 +508,25 @@ func (p *PiHolePlugin) fetchV6Summary(ctx context.Context, baseURL, sid, csrf st
 	queriesCached := toInt64(queries["cached"])
 	uniqueDomains := toInt64(queries["unique_domains"])
 
+	// Fetch blocking status
+	blocking := "enabled"
+	blockBody, blockStatus, blockErr := httpGetWithSID(ctx, baseURL+"/api/dns/blocking", sid, csrf)
+	if blockErr == nil && blockStatus == 200 {
+		var blockRaw map[string]interface{}
+		if json.Unmarshal(blockBody, &blockRaw) == nil {
+			if b, ok := blockRaw["blocking"].(string); ok {
+				blocking = b
+			}
+		}
+	}
+
+	piStatus := "running"
+	if blocking == "disabled" {
+		piStatus = "stopped"
+	}
+
 	return &piholeData{
-		status: "running",
+		status: piStatus,
 		summary: []StatItem{
 			{Label: "Queries Today", Value: FormatNumber(totalQueries), Type: "number"},
 			{Label: "Blocked", Value: fmt.Sprintf("%.1f%%", blockedPercent), Type: "percent"},
@@ -486,7 +543,8 @@ func (p *PiHolePlugin) fetchV6Summary(ctx context.Context, baseURL, sid, csrf st
 			"queriesForwarded": queriesForwarded,
 			"queriesCached":    queriesCached,
 			"uniqueDomains":    uniqueDomains,
-			"status":           "running",
+			"blocking":         blocking,
+			"status":           piStatus,
 			"version":          "v6",
 		},
 	}, nil
@@ -520,6 +578,83 @@ func (p *PiHolePlugin) collectV6Public(ctx context.Context, baseURL string) (*pi
 			"version":  "v6",
 		},
 	}, nil
+}
+
+// --- Actions ---
+
+// PerformAction implements ServiceActionPlugin for Pi-hole.
+func (p *PiHolePlugin) PerformAction(ctx context.Context, svc *DetectedService, action string, params map[string]interface{}) (string, error) {
+	switch action {
+	case "setBlocking":
+		return p.setBlocking(ctx, svc, params)
+	default:
+		return "", fmt.Errorf("unknown action: %s", action)
+	}
+}
+
+func (p *PiHolePlugin) setBlocking(ctx context.Context, svc *DetectedService, params map[string]interface{}) (string, error) {
+	enabled, _ := params["enabled"].(bool)
+
+	blocking := "enabled"
+	if !enabled {
+		blocking = "disabled"
+	}
+
+	// v5: use admin API
+	if svc.Version == "v5" {
+		action := "enable"
+		if !enabled {
+			action = "disable"
+		}
+		_, err := HTTPGet(ctx, svc.BaseURL+"/admin/api.php?"+action)
+		if err != nil {
+			return "", fmt.Errorf("v5 %s failed: %w", action, err)
+		}
+		return blocking, nil
+	}
+
+	// v6: POST /api/dns/blocking with session
+	if !v6Session.isValid() {
+		password := svc.Meta["password"]
+		if password == "" {
+			return "", fmt.Errorf("Pi-hole v6 requires authentication")
+		}
+		if err := v6Session.authenticate(ctx, svc.BaseURL, password); err != nil {
+			return "", fmt.Errorf("auth failed: %w", err)
+		}
+	}
+
+	sid, csrf := v6Session.get()
+	body, _ := json.Marshal(map[string]interface{}{"blocking": enabled})
+
+	respBody, status, err := httpRequestWithSID(ctx, "POST", svc.BaseURL+"/api/dns/blocking", body, sid, csrf)
+	if err != nil {
+		return "", fmt.Errorf("set blocking failed: %w", err)
+	}
+
+	if status == 401 {
+		// Session expired, retry once
+		v6Session.clear()
+		password := svc.Meta["password"]
+		if password == "" {
+			return "", fmt.Errorf("Pi-hole v6 requires authentication")
+		}
+		if err := v6Session.authenticate(ctx, svc.BaseURL, password); err != nil {
+			return "", fmt.Errorf("re-auth failed: %w", err)
+		}
+		sid, csrf = v6Session.get()
+		respBody, status, err = httpRequestWithSID(ctx, "POST", svc.BaseURL+"/api/dns/blocking", body, sid, csrf)
+		if err != nil {
+			return "", fmt.Errorf("set blocking retry failed: %w", err)
+		}
+	}
+
+	if status != 200 {
+		return "", fmt.Errorf("set blocking returned HTTP %d: %s", status, string(respBody))
+	}
+
+	log.Printf("services: pihole blocking set to %s", blocking)
+	return blocking, nil
 }
 
 // --- helpers ---
