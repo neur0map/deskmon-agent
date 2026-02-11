@@ -36,6 +36,7 @@ type ServiceStats struct {
 	Summary  []StatItem             `json:"summary"`
 	Stats    map[string]interface{} `json:"stats"`
 	Error    string                 `json:"error,omitempty"`
+	URL      string                 `json:"url,omitempty"`
 }
 
 // StatItem is a single key-value metric shown on the service card.

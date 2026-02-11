@@ -262,10 +262,12 @@ func (sd *ServiceDetector) runCollection() {
 					Summary:  []StatItem{},
 					Stats:    map[string]interface{}{},
 					Error:    err.Error(),
+					URL:      service.BaseURL,
 				}}
 				return
 			}
 
+			stats.URL = service.BaseURL
 			results <- result{stats: *stats}
 		}(p, svc)
 	}
