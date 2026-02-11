@@ -114,7 +114,37 @@ Full system stats and Docker container stats in a single response.
       "blockReadBytes": 2147483648,
       "blockWriteBytes": 1073741824,
       "pids": 12,
-      "startedAt": "2025-01-15T08:30:00Z"
+      "startedAt": "2025-01-15T08:30:00Z",
+      "ports": [
+        { "hostPort": 8080, "containerPort": 80, "protocol": "tcp" }
+      ],
+      "restartCount": 0,
+      "healthStatus": "healthy"
+    }
+  ],
+  "processes": [
+    {
+      "pid": 1234,
+      "name": "node",
+      "cpuPercent": 15.2,
+      "memoryMB": 256.5,
+      "memoryPercent": 1.5,
+      "command": "/usr/bin/node server.js",
+      "user": "www-data"
+    }
+  ],
+  "services": [
+    {
+      "pluginId": "pihole",
+      "name": "Pi-hole",
+      "icon": "shield.checkerboard",
+      "status": "running",
+      "summary": [
+        { "label": "Queries Today", "value": "45,231", "type": "number" },
+        { "label": "Blocked", "value": "12.5%", "type": "percent" }
+      ],
+      "stats": { "dns_queries_today": 45231, "ads_blocked_today": 5654 },
+      "url": "http://192.168.1.50:80"
     }
   ]
 }
@@ -135,7 +165,7 @@ If Docker is not installed or the socket is unavailable, `containers` is an empt
 
 System stats only, without Docker overhead.
 
-**Response** `200 OK` — same as `stats.system` above.
+**Response** `200 OK` — same shape as `stats.system` above.
 
 ---
 
@@ -143,7 +173,109 @@ System stats only, without Docker overhead.
 
 Docker container stats only.
 
-**Response** `200 OK` — same as `stats.containers` above (array).
+**Response** `200 OK` — same shape as `stats.containers` above (array).
+
+---
+
+## GET /stats/processes
+
+Top 10 processes sorted by CPU usage. CPU values are EMA-smoothed (alpha=0.3) for stability.
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "pid": 1234,
+    "name": "node",
+    "cpuPercent": 15.2,
+    "memoryMB": 256.5,
+    "memoryPercent": 1.5,
+    "command": "/usr/bin/node server.js",
+    "user": "www-data"
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pid` | `int32` | Process ID |
+| `name` | `string` | Process name from `/proc/<pid>/stat` |
+| `cpuPercent` | `float64` | EMA-smoothed CPU usage percentage |
+| `memoryMB` | `float64` | Resident memory in MB |
+| `memoryPercent` | `float64` | Memory as percentage of total RAM |
+| `command` | `string` | Full command line. Omitted if empty |
+| `user` | `string` | Process owner username. Omitted if unresolvable |
+
+---
+
+## GET /stats/services
+
+Auto-detected service stats. Returns an empty array if no supported services are found.
+
+Currently supported: **Pi-hole** (v5 and v6), **Traefik**, **Nginx**.
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "pluginId": "pihole",
+    "name": "Pi-hole",
+    "icon": "shield.checkerboard",
+    "status": "running",
+    "summary": [
+      { "label": "Queries Today", "value": "45,231", "type": "number" },
+      { "label": "Blocked", "value": "12.5%", "type": "percent" },
+      { "label": "Status", "value": "enabled", "type": "status" }
+    ],
+    "stats": {
+      "dns_queries_today": 45231,
+      "ads_blocked_today": 5654,
+      "ads_percentage_today": 12.5,
+      "domains_being_blocked": 120456,
+      "status": "enabled"
+    },
+    "url": "http://192.168.1.50:80"
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pluginId` | `string` | Unique plugin identifier (`pihole`, `traefik`, `nginx`) |
+| `name` | `string` | Human-readable name |
+| `icon` | `string` | SF Symbol name for macOS app rendering |
+| `status` | `string` | `running`, `stopped`, or `error` |
+| `summary` | `array` | Key-value metrics for the service card UI |
+| `summary[].type` | `string` | `number`, `percent`, `status`, or `text` |
+| `stats` | `object` | Raw stats from the service API. Structure varies per plugin |
+| `error` | `string` | Error message if `status` is `error`. Omitted otherwise |
+| `url` | `string` | Base URL of the detected service. Omitted if unavailable |
+
+---
+
+## GET /stats/services/debug
+
+Diagnostic info for service detection. Useful for troubleshooting why a service is or isn't detected.
+
+**Response** `200 OK`
+
+```json
+{
+  "registeredPlugins": ["pihole", "traefik", "nginx"],
+  "detected": {
+    "pihole": {
+      "pluginID": "pihole",
+      "name": "Pi-hole",
+      "baseURL": "http://192.168.1.50:80",
+      "version": "v6"
+    }
+  },
+  "dockerSocket": "/var/run/docker.sock",
+  "dockerAvailable": true
+}
+```
 
 ---
 
@@ -333,7 +465,7 @@ event: services
 data: [{"pluginId":"pihole","name":"Pi-hole","status":"running",...},...]
 ```
 
-**Keepalive** — Comment line every **30 seconds** to prevent proxy timeouts.
+**Keepalive** — Comment line every **15 seconds** to prevent proxy timeouts.
 
 ```
 : keepalive
@@ -351,7 +483,7 @@ data: [{"pluginId":"pihole","name":"Pi-hole","status":"running",...},...]
 
 - `X-Accel-Buffering: no` header disables nginx/reverse proxy buffering
 - `Cache-Control: no-cache` prevents intermediate caching
-- 30s keepalive pings prevent Cloudflare tunnel idle timeouts (~100s)
+- 15s keepalive pings prevent Cloudflare tunnel idle timeouts (~100s)
 - Server's WriteTimeout is disabled for this endpoint
 
 ---
@@ -430,10 +562,3 @@ services:
     password: "your-pihole-password"
 ```
 
----
-
-## Implemented Container Fields
-
-- `containers[].ports` — Array of port mappings `[{"hostPort": 8080, "containerPort": 80, "protocol": "tcp"}]`
-- `containers[].restartCount` — Number of container restarts
-- `containers[].healthStatus` — `"healthy"`, `"unhealthy"`, `"starting"`, `"none"`

@@ -6,7 +6,7 @@ Single binary. One-command install. Set it and forget it.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8)
+![Go](https://img.shields.io/badge/Go-1.22+-00ADD8)
 
 ---
 
@@ -47,7 +47,7 @@ Single binary. One-command install. Set it and forget it.
 ### Prerequisites
 
 - Linux server (Ubuntu, Debian, Fedora, etc.)
-- Go 1.21+ installed (`sudo apt install golang-go`)
+- Go 1.22+ installed (`sudo apt install golang-go` or [go.dev/dl](https://go.dev/dl/))
 - Git installed
 
 ### Install
@@ -312,9 +312,9 @@ deskmon-agent/
 │       └── systemctl.go     # Hardcoded systemctl commands
 ├── scripts/
 │   └── install.sh           # Server install/uninstall script
-├── docs/plans/              # Design documents
 ├── Makefile                 # Build, setup, package, test
 ├── agent-api-contract.md    # API contract (source of truth)
+├── ROADMAP.md               # Planned features
 └── README.md
 ```
 
