@@ -464,6 +464,10 @@ func (p *PiHolePlugin) fetchV6Summary(ctx context.Context, baseURL, sid, csrf st
 	clients := extractNested(raw, "clients")
 	activeClients := toInt64(clients["active"])
 
+	queriesForwarded := toInt64(queries["forwarded"])
+	queriesCached := toInt64(queries["cached"])
+	uniqueDomains := toInt64(queries["unique_domains"])
+
 	return &piholeData{
 		status: "running",
 		summary: []StatItem{
@@ -473,13 +477,17 @@ func (p *PiHolePlugin) fetchV6Summary(ctx context.Context, baseURL, sid, csrf st
 			{Label: "Clients", Value: FormatNumber(activeClients), Type: "number"},
 		},
 		stats: map[string]interface{}{
-			"queriesToday":    totalQueries,
-			"adsBlockedToday": blockedQueries,
-			"adsPercentToday": math.Round(blockedPercent*10) / 10,
-			"domainsBlocked":  domainsBlocked,
-			"activeClients":   activeClients,
-			"status":          "running",
-			"version":         "v6",
+			"queriesToday":     totalQueries,
+			"adsBlockedToday":  blockedQueries,
+			"adsPercentToday":  math.Round(blockedPercent*10) / 10,
+			"domainsBlocked":   domainsBlocked,
+			"activeClients":    activeClients,
+			"uniqueClients":    activeClients,
+			"queriesForwarded": queriesForwarded,
+			"queriesCached":    queriesCached,
+			"uniqueDomains":    uniqueDomains,
+			"status":           "running",
+			"version":          "v6",
 		},
 	}, nil
 }
