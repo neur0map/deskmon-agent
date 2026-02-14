@@ -16,17 +16,18 @@ import (
 )
 
 type SystemStats struct {
-	CPU     CPUStats     `json:"cpu"`
-	Memory  MemoryStats  `json:"memory"`
-	Disk    DiskStats    `json:"disk"`
-	Network NetworkStats `json:"network"`
-	Uptime  int64        `json:"uptimeSeconds"`
+	CPU     CPUStats      `json:"cpu"`
+	Memory  MemoryStats   `json:"memory"`
+	Disks   []DiskInfo    `json:"disks"`
+	Network NetworkReport `json:"network"`
+	Uptime  int64         `json:"uptimeSeconds"`
 }
 
 type CPUStats struct {
-	UsagePercent float64 `json:"usagePercent"`
-	CoreCount    int     `json:"coreCount"`
-	Temperature  float64 `json:"temperature"`
+	UsagePercent         float64 `json:"usagePercent"`
+	CoreCount            int     `json:"coreCount"`
+	Temperature          float64 `json:"temperature"`
+	TemperatureAvailable bool    `json:"temperatureAvailable"`
 }
 
 type MemoryStats struct {
@@ -34,14 +35,26 @@ type MemoryStats struct {
 	TotalBytes uint64 `json:"totalBytes"`
 }
 
-type DiskStats struct {
+type DiskInfo struct {
+	MountPoint string `json:"mountPoint"`
+	Device     string `json:"device"`
+	FsType     string `json:"fsType"`
 	UsedBytes  uint64 `json:"usedBytes"`
 	TotalBytes uint64 `json:"totalBytes"`
 }
 
-type NetworkStats struct {
+type InterfaceStats struct {
 	DownloadBytesPerSec float64 `json:"downloadBytesPerSec"`
 	UploadBytesPerSec   float64 `json:"uploadBytesPerSec"`
+	RxErrors            uint64  `json:"rxErrors,omitempty"`
+	RxDrops             uint64  `json:"rxDrops,omitempty"`
+	TxErrors            uint64  `json:"txErrors,omitempty"`
+	TxDrops             uint64  `json:"txDrops,omitempty"`
+}
+
+type NetworkReport struct {
+	Physical InterfaceStats  `json:"physical"`
+	Virtual  *InterfaceStats `json:"virtual,omitempty"`
 }
 
 type ProcessInfo struct {
@@ -66,9 +79,19 @@ type cpuSample struct {
 }
 
 type netSample struct {
-	rxBytes   uint64
-	txBytes   uint64
-	timestamp time.Time
+	physRx      uint64
+	physTx      uint64
+	physRxErr   uint64
+	physRxDrop  uint64
+	physTxErr   uint64
+	physTxDrop  uint64
+	virtRx      uint64
+	virtTx      uint64
+	virtRxErr   uint64
+	virtRxDrop  uint64
+	virtTxErr   uint64
+	virtTxDrop  uint64
+	timestamp   time.Time
 }
 
 // SystemEvent is the payload broadcast each time system stats are sampled.
@@ -83,8 +106,8 @@ type SystemCollector struct {
 	coreCount   int
 	prevCPU     cpuSample
 	prevNet     netSample
-	netDownload float64
-	netUpload   float64
+	netPhysical InterfaceStats
+	netVirtual  InterfaceStats
 	stopCh      chan struct{}
 
 	// Process monitoring
@@ -147,10 +170,24 @@ func (sc *SystemCollector) sample() {
 	netCur := readNetSample()
 	elapsed := netCur.timestamp.Sub(sc.prevNet.timestamp).Seconds()
 	if elapsed > 0 {
-		sc.netDownload = float64(netCur.rxBytes-sc.prevNet.rxBytes) / elapsed
-		sc.netUpload = float64(netCur.txBytes-sc.prevNet.txBytes) / elapsed
-		sc.netDownload = math.Round(sc.netDownload*100) / 100
-		sc.netUpload = math.Round(sc.netUpload*100) / 100
+		sc.netPhysical = calcInterfaceStats(
+			sc.prevNet.physRx, netCur.physRx,
+			sc.prevNet.physTx, netCur.physTx,
+			sc.prevNet.physRxErr, netCur.physRxErr,
+			sc.prevNet.physRxDrop, netCur.physRxDrop,
+			sc.prevNet.physTxErr, netCur.physTxErr,
+			sc.prevNet.physTxDrop, netCur.physTxDrop,
+			elapsed,
+		)
+		sc.netVirtual = calcInterfaceStats(
+			sc.prevNet.virtRx, netCur.virtRx,
+			sc.prevNet.virtTx, netCur.virtTx,
+			sc.prevNet.virtRxErr, netCur.virtRxErr,
+			sc.prevNet.virtRxDrop, netCur.virtRxDrop,
+			sc.prevNet.virtTxErr, netCur.virtTxErr,
+			sc.prevNet.virtTxDrop, netCur.virtTxDrop,
+			elapsed,
+		)
 	}
 	sc.prevNet = netCur
 
@@ -159,8 +196,8 @@ func (sc *SystemCollector) sample() {
 
 	// Snapshot for broadcast while holding the lock
 	cpuUsage := sc.cpuUsage
-	download := sc.netDownload
-	upload := sc.netUpload
+	phys := sc.netPhysical
+	virt := sc.netVirtual
 	procs := make([]ProcessInfo, len(sc.topProcesses))
 	copy(procs, sc.topProcesses)
 
@@ -168,24 +205,28 @@ func (sc *SystemCollector) sample() {
 
 	// Broadcast full system snapshot (non-blocking)
 	mem := readMemory()
-	disk := readDisk()
-	temp := readTemperature()
+	disks := readDisks()
+	temp, tempAvail := readTemperature()
 	uptime := readUptime()
+
+	netReport := NetworkReport{Physical: phys}
+	if virt.DownloadBytesPerSec > 0 || virt.UploadBytesPerSec > 0 ||
+		virt.RxErrors > 0 || virt.TxErrors > 0 || virt.RxDrops > 0 || virt.TxDrops > 0 {
+		netReport.Virtual = &virt
+	}
 
 	sc.Broadcast.Send(SystemEvent{
 		System: SystemStats{
 			CPU: CPUStats{
-				UsagePercent: cpuUsage,
-				CoreCount:    sc.coreCount,
-				Temperature:  temp,
+				UsagePercent:         cpuUsage,
+				CoreCount:            sc.coreCount,
+				Temperature:          temp,
+				TemperatureAvailable: tempAvail,
 			},
 			Memory:  mem,
-			Disk:    disk,
-			Network: NetworkStats{
-				DownloadBytesPerSec: download,
-				UploadBytesPerSec:   upload,
-			},
-			Uptime: uptime,
+			Disks:   disks,
+			Network: netReport,
+			Uptime:  uptime,
 		},
 		Processes: procs,
 	})
@@ -194,28 +235,32 @@ func (sc *SystemCollector) sample() {
 func (sc *SystemCollector) Collect() SystemStats {
 	sc.mu.RLock()
 	cpuUsage := sc.cpuUsage
-	download := sc.netDownload
-	upload := sc.netUpload
+	phys := sc.netPhysical
+	virt := sc.netVirtual
 	sc.mu.RUnlock()
 
 	mem := readMemory()
-	disk := readDisk()
-	temp := readTemperature()
+	disks := readDisks()
+	temp, tempAvail := readTemperature()
 	uptime := readUptime()
+
+	netReport := NetworkReport{Physical: phys}
+	if virt.DownloadBytesPerSec > 0 || virt.UploadBytesPerSec > 0 ||
+		virt.RxErrors > 0 || virt.TxErrors > 0 || virt.RxDrops > 0 || virt.TxDrops > 0 {
+		netReport.Virtual = &virt
+	}
 
 	return SystemStats{
 		CPU: CPUStats{
-			UsagePercent: cpuUsage,
-			CoreCount:    sc.coreCount,
-			Temperature:  temp,
+			UsagePercent:         cpuUsage,
+			CoreCount:            sc.coreCount,
+			Temperature:          temp,
+			TemperatureAvailable: tempAvail,
 		},
 		Memory:  mem,
-		Disk:    disk,
-		Network: NetworkStats{
-			DownloadBytesPerSec: download,
-			UploadBytesPerSec:   upload,
-		},
-		Uptime: uptime,
+		Disks:   disks,
+		Network: netReport,
+		Uptime:  uptime,
 	}
 }
 
@@ -498,6 +543,21 @@ func readCPUSample() cpuSample {
 	return cpuSample{}
 }
 
+// isVirtualInterface returns true for docker bridges, veth pairs, and similar virtual interfaces.
+func isVirtualInterface(name string) bool {
+	if strings.HasPrefix(name, "docker") ||
+		strings.HasPrefix(name, "br-") ||
+		strings.HasPrefix(name, "veth") ||
+		strings.HasPrefix(name, "virbr") ||
+		strings.HasPrefix(name, "lxc") ||
+		strings.HasPrefix(name, "flannel") ||
+		strings.HasPrefix(name, "cni") ||
+		strings.HasPrefix(name, "cali") {
+		return true
+	}
+	return false
+}
+
 func readNetSample() netSample {
 	f, err := os.Open("/proc/net/dev")
 	if err != nil {
@@ -505,11 +565,12 @@ func readNetSample() netSample {
 	}
 	defer f.Close()
 
-	var totalRx, totalTx uint64
+	var s netSample
+	s.timestamp = time.Now()
+
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Skip header lines
 		if strings.Contains(line, "|") || strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -518,24 +579,59 @@ func readNetSample() netSample {
 			continue
 		}
 		iface := strings.TrimSpace(parts[0])
-		// Skip loopback
 		if iface == "lo" {
 			continue
 		}
 		fields := strings.Fields(parts[1])
-		if len(fields) < 10 {
+		if len(fields) < 12 {
 			continue
 		}
+
+		// /proc/net/dev columns:
+		// RX: bytes(0) packets(1) errs(2) drop(3) ...
+		// TX: bytes(8) packets(9) errs(10) drop(11) ...
 		rx, _ := strconv.ParseUint(fields[0], 10, 64)
+		rxErr, _ := strconv.ParseUint(fields[2], 10, 64)
+		rxDrop, _ := strconv.ParseUint(fields[3], 10, 64)
 		tx, _ := strconv.ParseUint(fields[8], 10, 64)
-		totalRx += rx
-		totalTx += tx
+		txErr, _ := strconv.ParseUint(fields[10], 10, 64)
+		txDrop, _ := strconv.ParseUint(fields[11], 10, 64)
+
+		if isVirtualInterface(iface) {
+			s.virtRx += rx
+			s.virtTx += tx
+			s.virtRxErr += rxErr
+			s.virtRxDrop += rxDrop
+			s.virtTxErr += txErr
+			s.virtTxDrop += txDrop
+		} else {
+			s.physRx += rx
+			s.physTx += tx
+			s.physRxErr += rxErr
+			s.physRxDrop += rxDrop
+			s.physTxErr += txErr
+			s.physTxDrop += txDrop
+		}
 	}
 
-	return netSample{
-		rxBytes:   totalRx,
-		txBytes:   totalTx,
-		timestamp: time.Now(),
+	return s
+}
+
+func calcInterfaceStats(
+	prevRx, curRx, prevTx, curTx uint64,
+	prevRxErr, curRxErr, prevRxDrop, curRxDrop uint64,
+	prevTxErr, curTxErr, prevTxDrop, curTxDrop uint64,
+	elapsed float64,
+) InterfaceStats {
+	dl := float64(curRx-prevRx) / elapsed
+	ul := float64(curTx-prevTx) / elapsed
+	return InterfaceStats{
+		DownloadBytesPerSec: math.Round(dl*100) / 100,
+		UploadBytesPerSec:   math.Round(ul*100) / 100,
+		RxErrors:            curRxErr - prevRxErr,
+		RxDrops:             curRxDrop - prevRxDrop,
+		TxErrors:            curTxErr - prevTxErr,
+		TxDrops:             curTxDrop - prevTxDrop,
 	}
 }
 
@@ -577,29 +673,91 @@ func parseMemInfoValue(line string) uint64 {
 	return val
 }
 
-func readDisk() DiskStats {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/", &stat); err != nil {
-		return DiskStats{}
-	}
-
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bfree * uint64(stat.Bsize)
-	usedBytes := totalBytes - freeBytes
-
-	return DiskStats{
-		UsedBytes:  usedBytes,
-		TotalBytes: totalBytes,
-	}
+// pseudoFS is the set of filesystem types to skip when enumerating disks.
+var pseudoFS = map[string]bool{
+	"tmpfs": true, "devtmpfs": true, "sysfs": true, "proc": true,
+	"cgroup": true, "cgroup2": true, "overlay": true, "nsfs": true,
+	"fuse.lxcfs": true, "squashfs": true, "devpts": true, "securityfs": true,
+	"pstore": true, "efivarfs": true, "bpf": true, "tracefs": true,
+	"debugfs": true, "hugetlbfs": true, "mqueue": true, "configfs": true,
+	"fusectl": true, "autofs": true, "ramfs": true, "rpc_pipefs": true,
+	"nfsd": true, "fuse.gvfsd-fuse": true,
 }
 
-func readTemperature() float64 {
+func readDisks() []DiskInfo {
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	seenDevices := make(map[string]bool)
+	var disks []DiskInfo
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		device := fields[0]
+		mountPoint := fields[1]
+		fsType := fields[2]
+
+		// Skip pseudo-filesystems
+		if pseudoFS[fsType] {
+			continue
+		}
+		// Skip non-device mounts (e.g., "none", "systemd-1")
+		if !strings.HasPrefix(device, "/") {
+			continue
+		}
+		// Deduplicate by device (keep first mount)
+		if seenDevices[device] {
+			continue
+		}
+		seenDevices[device] = true
+
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(mountPoint, &stat); err != nil {
+			continue
+		}
+
+		totalBytes := stat.Blocks * uint64(stat.Bsize)
+		availBytes := stat.Bavail * uint64(stat.Bsize) // user-available (excludes reserved)
+		usedBytes := totalBytes - (stat.Bfree * uint64(stat.Bsize))
+
+		// Skip tiny/empty filesystems (< 50MB)
+		if totalBytes < 50*1024*1024 {
+			continue
+		}
+
+		_ = availBytes // Bavail used for correct "available" calculation
+		disks = append(disks, DiskInfo{
+			MountPoint: mountPoint,
+			Device:     device,
+			FsType:     fsType,
+			UsedBytes:  usedBytes,
+			TotalBytes: totalBytes,
+		})
+	}
+
+	// Sort by mount point for stable ordering
+	sort.Slice(disks, func(i, j int) bool {
+		return disks[i].MountPoint < disks[j].MountPoint
+	})
+
+	return disks
+}
+
+func readTemperature() (float64, bool) {
 	matches, err := filepath.Glob("/sys/class/thermal/thermal_zone*/temp")
 	if err != nil || len(matches) == 0 {
-		return 0
+		return 0, false
 	}
 
 	var maxTemp float64
+	found := false
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -609,14 +767,16 @@ func readTemperature() float64 {
 		if err != nil {
 			continue
 		}
-		// Kernel reports millidegrees
 		temp := val / 1000.0
-		if temp > maxTemp {
-			maxTemp = temp
+		if temp > 0 {
+			found = true
+			if temp > maxTemp {
+				maxTemp = temp
+			}
 		}
 	}
 
-	return math.Round(maxTemp*10) / 10
+	return math.Round(maxTemp*10) / 10, found
 }
 
 func readUptime() int64 {
