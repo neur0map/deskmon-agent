@@ -291,8 +291,9 @@ func (sc *SystemCollector) sampleProcesses() {
 			}
 		}
 
-		// EMA smoothing (alpha=0.3) to prevent noisy per-second fluctuations
-		const emaAlpha = 0.3
+		// EMA smoothing (alpha=0.2) to prevent noisy per-second fluctuations.
+		// Lower alpha = heavier smoothing = more stable rankings.
+		const emaAlpha = 0.2
 		cpuPercent := rawCPU
 		if prev, exists := sc.smoothedCPU[pid]; exists {
 			cpuPercent = emaAlpha*rawCPU + (1-emaAlpha)*prev
@@ -333,16 +334,25 @@ func (sc *SystemCollector) sampleProcesses() {
 		}
 	}
 
-	// Sort by CPU percent descending; use PID as tiebreaker for stability
+	// Combined score: CPU usage + memory weight so heavy-RAM processes stay visible.
+	// 200 MB ≈ 20 score points, comparable to 20% CPU.
+	procScore := func(p ProcessInfo) float64 {
+		return p.CPUPercent + p.MemoryMB*0.1
+	}
+
+	// Sort by combined score descending; use PID as tiebreaker for stability.
+	// Threshold of 0.5 prevents tiny fluctuations from shuffling the list.
 	sort.Slice(processes, func(i, j int) bool {
-		if math.Abs(processes[i].CPUPercent-processes[j].CPUPercent) < 0.05 {
+		si, sj := procScore(processes[i]), procScore(processes[j])
+		if math.Abs(si-sj) < 0.5 {
 			return processes[i].PID < processes[j].PID
 		}
-		return processes[i].CPUPercent > processes[j].CPUPercent
+		return si > sj
 	})
 
-	// Keep top 10 (or whatever the max we might need)
-	const maxKeep = 10
+	// Keep top 15 — frontend caps display at 10 but uses the extra
+	// headroom for its damped sort to prevent processes popping in/out.
+	const maxKeep = 15
 	if len(processes) > maxKeep {
 		processes = processes[:maxKeep]
 	}

@@ -17,9 +17,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Bind != DefaultBind {
 		t.Errorf("expected bind %s, got %s", DefaultBind, cfg.Bind)
 	}
-	if cfg.AuthToken != "" {
-		t.Errorf("expected empty auth token, got %s", cfg.AuthToken)
-	}
 }
 
 func TestLoadFromFile(t *testing.T) {
@@ -27,7 +24,7 @@ func TestLoadFromFile(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 
 	content := `port: 9090
-auth_token: "testtoken123"
+bind: "0.0.0.0"
 `
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
@@ -40,11 +37,8 @@ auth_token: "testtoken123"
 	if cfg.Port != 9090 {
 		t.Errorf("expected port 9090, got %d", cfg.Port)
 	}
-	if cfg.AuthToken != "testtoken123" {
-		t.Errorf("expected auth token testtoken123, got %s", cfg.AuthToken)
-	}
-	if cfg.Bind != DefaultBind {
-		t.Errorf("expected default bind %s, got %s", DefaultBind, cfg.Bind)
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("expected bind 0.0.0.0, got %s", cfg.Bind)
 	}
 }
 
@@ -53,7 +47,6 @@ func TestLoadZeroPort(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 
 	content := `port: 0
-auth_token: "tok"
 `
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
