@@ -90,11 +90,6 @@ do_uninstall() {
     exit 0
 }
 
-generate_token() {
-    # Generate a 32-character random hex token
-    head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
-}
-
 find_binary() {
     # If --binary was provided, use that
     if [[ -n "${BINARY_PATH}" ]]; then
@@ -154,15 +149,13 @@ do_install() {
     # Generate config if it doesn't exist (preserve existing config on upgrades)
     if [[ -f "${CONFIG_FILE}" ]]; then
         echo "  Existing config preserved at ${CONFIG_FILE}"
-        AUTH_TOKEN=$(grep 'auth_token:' "${CONFIG_FILE}" | awk '{print $2}' | tr -d '"')
         # Read existing port for display
         EXISTING_PORT=$(grep 'port:' "${CONFIG_FILE}" | awk '{print $2}')
         PORT="${EXISTING_PORT:-${PORT}}"
     else
-        AUTH_TOKEN=$(generate_token)
         cat > "${CONFIG_FILE}" <<CONF
 port: ${PORT}
-auth_token: "${AUTH_TOKEN}"
+bind: "127.0.0.1"
 CONF
         chmod 600 "${CONFIG_FILE}"
         echo "  Config written to ${CONFIG_FILE}"
@@ -213,21 +206,20 @@ SERVICE
     echo "  deskmon-agent installed successfully"
     echo "==========================================="
     echo ""
-    echo "  Port:       ${PORT}"
-    echo "  Auth Token: ${AUTH_TOKEN}"
-    echo "  Config:     ${CONFIG_FILE}"
-    echo "  Service:    ${SERVICE_NAME}"
+    echo "  Listening: 127.0.0.1:${PORT} (localhost only)"
+    echo "  Config:    ${CONFIG_FILE}"
+    echo "  Service:   ${SERVICE_NAME}"
     echo ""
-    echo "  Add this server to your Deskmon macOS app:"
-    echo "    Address: ${SERVER_IP}:${PORT}"
-    echo "    Token:   ${AUTH_TOKEN}"
+    echo "  The agent binds to localhost only."
+    echo "  The Deskmon macOS app connects via SSH tunnel."
+    echo ""
+    echo "  Add this server in the macOS app:"
+    echo "    Host:     ${SERVER_IP}"
+    echo "    SSH User: $(logname 2>/dev/null || echo '<your-user>')"
     echo ""
     echo "  Useful commands:"
     echo "    systemctl status ${SERVICE_NAME}"
     echo "    journalctl -u ${SERVICE_NAME} -f"
-    echo ""
-    echo "  Firewall reminder:"
-    echo "    sudo ufw allow ${PORT}/tcp"
     echo "==========================================="
 }
 
