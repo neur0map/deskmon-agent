@@ -7,24 +7,21 @@ import (
 	"testing"
 
 	"github.com/neur0map/deskmon-agent/internal/collector"
-	"github.com/neur0map/deskmon-agent/internal/collector/services"
 	"github.com/neur0map/deskmon-agent/internal/config"
 )
 
-func newTestServer(authToken string) *Server {
+func newTestServer() *Server {
 	cfg := &config.Config{
-		Port:      7654,
-		Bind:      "127.0.0.1",
-		AuthToken: authToken,
+		Port: 7654,
+		Bind: "127.0.0.1",
 	}
 	sys := collector.NewSystemCollector()
 	docker := collector.NewDockerCollector("/var/run/docker.sock")
-	svcDetector := services.NewServiceDetector("/var/run/docker.sock")
-	return NewServer(cfg, sys, docker, svcDetector, "test", "")
+	return NewServer(cfg, sys, docker, "test", "")
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	srv := newTestServer("testtoken")
+	srv := newTestServer()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -43,113 +40,8 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_ValidToken(t *testing.T) {
-	srv := newTestServer("secrettoken")
-
-	called := false
-	handler := srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
-	req.Header.Set("Authorization", "Bearer secrettoken")
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if !called {
-		t.Error("handler was not called with valid token")
-	}
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-}
-
-func TestAuthMiddleware_InvalidToken(t *testing.T) {
-	srv := newTestServer("secrettoken")
-
-	called := false
-	handler := srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
-	req.Header.Set("Authorization", "Bearer wrongtoken")
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if called {
-		t.Error("handler should not be called with invalid token")
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w.Code)
-	}
-}
-
-func TestAuthMiddleware_MissingToken(t *testing.T) {
-	srv := newTestServer("secrettoken")
-
-	called := false
-	handler := srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if called {
-		t.Error("handler should not be called without token")
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w.Code)
-	}
-}
-
-func TestAuthMiddleware_NoBearerPrefix(t *testing.T) {
-	srv := newTestServer("secrettoken")
-
-	called := false
-	handler := srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
-	req.Header.Set("Authorization", "secrettoken")
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if called {
-		t.Error("handler should not be called without Bearer prefix")
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w.Code)
-	}
-}
-
-func TestAuthMiddleware_NoTokenConfigured(t *testing.T) {
-	srv := newTestServer("")
-
-	called := false
-	handler := srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
-	req.Header.Set("Authorization", "Bearer anytoken")
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if called {
-		t.Error("handler should not be called when no token is configured")
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w.Code)
-	}
-}
-
 func TestRateLimiting(t *testing.T) {
-	srv := newTestServer("tok")
+	srv := newTestServer()
 
 	handler := srv.rateLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -186,7 +78,7 @@ func TestRateLimiting(t *testing.T) {
 }
 
 func TestAgentStatus(t *testing.T) {
-	srv := newTestServer("tok")
+	srv := newTestServer()
 
 	req := httptest.NewRequest(http.MethodGet, "/agent/status", nil)
 	w := httptest.NewRecorder()

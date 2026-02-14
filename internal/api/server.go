@@ -1,18 +1,15 @@
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/neur0map/deskmon-agent/internal/collector"
-	"github.com/neur0map/deskmon-agent/internal/collector/services"
 	"github.com/neur0map/deskmon-agent/internal/config"
 )
 
@@ -21,7 +18,6 @@ type Server struct {
 	configPath   string
 	system       *collector.SystemCollector
 	docker       *collector.DockerCollector
-	services     *services.ServiceDetector
 	version      string
 	httpSrv      *http.Server
 	dockerSocket string
@@ -41,13 +37,12 @@ const (
 	maxBodySize  = 1024 // 1KB
 )
 
-func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, svcDetector *services.ServiceDetector, version, configPath string) *Server {
+func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *collector.DockerCollector, version, configPath string) *Server {
 	return &Server{
 		cfg:          cfg,
 		configPath:   configPath,
 		system:       system,
 		docker:       docker,
-		services:     svcDetector,
 		version:      version,
 		dockerSocket: config.DefaultDockerSock,
 		rateMap:      make(map[string]*rateBucket),
@@ -58,34 +53,27 @@ func NewServer(cfg *config.Config, system *collector.SystemCollector, docker *co
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
-	// Public endpoint
+	// All endpoints — no auth needed (SSH handles authentication,
+	// agent binds to localhost only)
 	mux.HandleFunc("GET /health", s.handleHealth)
-
-	// Authenticated endpoints
-	mux.HandleFunc("GET /stats", s.authMiddleware(s.handleStats))
-	mux.HandleFunc("GET /stats/system", s.authMiddleware(s.handleSystemStats))
-	mux.HandleFunc("GET /stats/docker", s.authMiddleware(s.handleDockerStats))
-	mux.HandleFunc("GET /stats/processes", s.authMiddleware(s.handleProcessStats))
-	mux.HandleFunc("GET /stats/services", s.authMiddleware(s.handleServiceStats))
-	mux.HandleFunc("GET /stats/services/debug", s.authMiddleware(s.handleServiceDebug))
-	mux.HandleFunc("GET /stats/stream", s.authMiddleware(s.handleStatsStream))
+	mux.HandleFunc("GET /stats", s.handleStats)
+	mux.HandleFunc("GET /stats/system", s.handleSystemStats)
+	mux.HandleFunc("GET /stats/docker", s.handleDockerStats)
+	mux.HandleFunc("GET /stats/processes", s.handleProcessStats)
+	mux.HandleFunc("GET /stats/stream", s.handleStatsStream)
 
 	// Agent control endpoints
-	mux.HandleFunc("POST /agent/restart", s.authMiddleware(s.handleAgentRestart))
-	mux.HandleFunc("POST /agent/stop", s.authMiddleware(s.handleAgentStop))
-	mux.HandleFunc("GET /agent/status", s.authMiddleware(s.handleAgentStatus))
+	mux.HandleFunc("POST /agent/restart", s.handleAgentRestart)
+	mux.HandleFunc("POST /agent/stop", s.handleAgentStop)
+	mux.HandleFunc("GET /agent/status", s.handleAgentStatus)
 
 	// Container action endpoints
-	mux.HandleFunc("POST /containers/{id}/start", s.authMiddleware(s.handleContainerStart))
-	mux.HandleFunc("POST /containers/{id}/stop", s.authMiddleware(s.handleContainerStop))
-	mux.HandleFunc("POST /containers/{id}/restart", s.authMiddleware(s.handleContainerRestart))
+	mux.HandleFunc("POST /containers/{id}/start", s.handleContainerStart)
+	mux.HandleFunc("POST /containers/{id}/stop", s.handleContainerStop)
+	mux.HandleFunc("POST /containers/{id}/restart", s.handleContainerRestart)
 
 	// Process action endpoints
-	mux.HandleFunc("POST /processes/{pid}/kill", s.authMiddleware(s.handleProcessKill))
-
-	// Service configuration and action endpoints
-	mux.HandleFunc("POST /services/{pluginId}/configure", s.authMiddleware(s.handleServiceConfigure))
-	mux.HandleFunc("POST /services/{pluginId}/action", s.authMiddleware(s.handleServiceAction))
+	mux.HandleFunc("POST /processes/{pid}/kill", s.handleProcessKill)
 
 	handler := s.rateLimitMiddleware(s.securityHeaders(mux))
 
@@ -164,40 +152,6 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
-}
-
-func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-
-		if s.cfg.AuthToken == "" {
-			log.Printf("auth reject %s %s from %s: no token configured on agent", r.Method, r.URL.Path, ip)
-			http.Error(w, "", http.StatusUnauthorized)
-			return
-		}
-
-		auth := r.Header.Get("Authorization")
-		if auth == "" {
-			log.Printf("auth reject %s %s from %s: missing Authorization header", r.Method, r.URL.Path, ip)
-			http.Error(w, "", http.StatusUnauthorized)
-			return
-		}
-
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if token == auth {
-			log.Printf("auth reject %s %s from %s: missing Bearer prefix", r.Method, r.URL.Path, ip)
-			http.Error(w, "", http.StatusUnauthorized)
-			return
-		}
-
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AuthToken)) != 1 {
-			log.Printf("auth reject %s %s from %s: invalid token", r.Method, r.URL.Path, ip)
-			http.Error(w, "", http.StatusUnauthorized)
-			return
-		}
-
-		next(w, r)
-	}
 }
 
 func writeJSON(w http.ResponseWriter, data interface{}) {

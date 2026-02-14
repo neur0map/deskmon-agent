@@ -7,26 +7,16 @@ import (
 )
 
 const (
-	DefaultPort        = 7654
-	DefaultBind        = "0.0.0.0"
-	DefaultConfigPath  = "/etc/deskmon/config.yaml"
-	DefaultDockerSock  = "/var/run/docker.sock"
+	DefaultPort          = 7654
+	DefaultBind          = "127.0.0.1"
+	DefaultConfigPath    = "/etc/deskmon/config.yaml"
+	DefaultDockerSock    = "/var/run/docker.sock"
 	DefaultSampleInterval = 1 // seconds
 )
 
 type Config struct {
-	Port      int            `yaml:"port"`
-	AuthToken string         `yaml:"auth_token"`
-	Bind      string         `yaml:"bind"`
-	Services  ServicesConfig `yaml:"services,omitempty"`
-}
-
-type ServicesConfig struct {
-	PiHole PiHoleConfig `yaml:"pihole,omitempty"`
-}
-
-type PiHoleConfig struct {
-	Password string `yaml:"password,omitempty"`
+	Port int    `yaml:"port"`
+	Bind string `yaml:"bind"`
 }
 
 func (cfg *Config) Save(path string) error {

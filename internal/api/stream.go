@@ -9,7 +9,7 @@ import (
 )
 
 // handleStatsStream serves an SSE stream of live stats updates.
-// Events: "system" (1s), "docker" (5s), "services" (10s), keepalive (30s).
+// Events: "system" (1s), "docker" (5s), keepalive (15s).
 func (s *Server) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -44,9 +44,6 @@ func (s *Server) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 	dockerCh, dockerCleanup := s.docker.Broadcast.Subscribe(2)
 	defer dockerCleanup()
 
-	svcCh, svcCleanup := s.services.Broadcast.Subscribe(2)
-	defer svcCleanup()
-
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
 
@@ -63,9 +60,6 @@ func (s *Server) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 
 		case ev := <-dockerCh:
 			writeSSE(w, flusher, "docker", ev)
-
-		case ev := <-svcCh:
-			writeSSE(w, flusher, "services", ev)
 
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": keepalive\n\n")

@@ -10,7 +10,6 @@ import (
 
 	"github.com/neur0map/deskmon-agent/internal/api"
 	"github.com/neur0map/deskmon-agent/internal/collector"
-	"github.com/neur0map/deskmon-agent/internal/collector/services"
 	"github.com/neur0map/deskmon-agent/internal/config"
 )
 
@@ -34,10 +33,6 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	if cfg.AuthToken == "" {
-		log.Println("WARNING: no auth_token configured — all authenticated endpoints will return 401")
-	}
-
 	// Initialize collectors
 	systemCollector := collector.NewSystemCollector()
 	systemCollector.Start()
@@ -47,22 +42,10 @@ func main() {
 	dockerCollector.Start()
 	defer dockerCollector.Stop()
 
-	// Initialize service detector (auto-discovers Pi-hole, Traefik, etc.)
-	svcDetector := services.NewServiceDetector(config.DefaultDockerSock)
-
-	// Inject service credentials from config
-	if cfg.Services.PiHole.Password != "" {
-		svcDetector.SetServiceConfig("pihole", "password", cfg.Services.PiHole.Password)
-		log.Println("pihole password loaded from config")
-	}
-
-	svcDetector.Start()
-	defer svcDetector.Stop()
-
 	log.Printf("listening on %s:%d", cfg.Bind, cfg.Port)
 
 	// Start HTTP server
-	srv := api.NewServer(cfg, systemCollector, dockerCollector, svcDetector, Version, *configPath)
+	srv := api.NewServer(cfg, systemCollector, dockerCollector, Version, *configPath)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
