@@ -18,12 +18,12 @@ Single binary. One-command install. Set it and forget it.
 │  ┌───────────────────────────────────────────────────┐  │
 │  │         Deskmon macOS App (SwiftUI)               │  │
 │  │                                                   │  │
-│  │  Connects via SSE for live streaming stats.        │  │
+│  │  Connects via SSH tunnel for live streaming stats.  │  │
 │  │  Renders CPU, RAM, disk, network, containers.     │  │
 │  │  Controls agent: restart, stop, container mgmt.   │  │
 │  └───────────────────────────────────────────────────┘  │
 └───────────────────────┬─────────────────────────────────┘
-                        │ HTTP (Bearer token auth)
+                        │ SSH tunnel → localhost:7654
                         ▼
 ┌─────────────────────────────────────────────────────────┐
 │                   Your Linux Server                     │
@@ -32,10 +32,10 @@ Single binary. One-command install. Set it and forget it.
 │  │                                                   │  │
 │  │  Reads /proc and /sys for system metrics          │  │
 │  │  Queries Docker socket for container stats        │  │
-│  │  Serves JSON on a single port (default 7654)      │  │
+│  │  Serves JSON on localhost:7654 (not exposed)       │  │
 │  │  Managed by systemd — auto-start, auto-recover    │  │
 │  │                                                   │  │
-│  │  No cloud. No relay. Direct connection.           │  │
+│  │  No cloud. No relay. No tokens. SSH handles auth. │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -58,7 +58,7 @@ cd deskmon-agent
 sudo make setup
 ```
 
-That's it. One command builds the binary, installs it, generates an auth token, creates a systemd service, and starts the agent.
+That's it. One command builds the binary, installs it, creates a systemd service, and starts the agent.
 
 **Custom port:**
 
@@ -84,21 +84,20 @@ Installing deskmon-agent...
   deskmon-agent installed successfully
 ===========================================
 
-  Port:       7654
-  Auth Token: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
-  Config:     /etc/deskmon/config.yaml
-  Service:    deskmon-agent
+  Listening: 127.0.0.1:7654 (localhost only)
+  Config:    /etc/deskmon/config.yaml
+  Service:   deskmon-agent
 
-  Add this server to your Deskmon macOS app:
-    Address: 192.168.1.100:7654
-    Token:   a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+  The agent binds to localhost only.
+  The Deskmon macOS app connects via SSH tunnel.
+
+  Add this server in the macOS app:
+    Host:     192.168.1.100
+    SSH User: your-user
 
   Useful commands:
     systemctl status deskmon-agent
     journalctl -u deskmon-agent -f
-
-  Firewall reminder:
-    sudo ufw allow 7654/tcp
 ===========================================
 ```
 
@@ -106,18 +105,19 @@ Installing deskmon-agent...
 
 1. Open Deskmon on your Mac
 2. Go to **Settings** > **+ Add Server**
-3. Enter the server address and port (e.g. `192.168.1.100:7654`)
-4. Enter the auth token printed during install
-5. Green dot = connected
+3. Enter your server's hostname or IP (e.g. `192.168.1.100`)
+4. Enter your SSH username and password
+5. The app connects via SSH tunnel, auto-generates an ed25519 key, and installs it on your server
+6. Green dot = connected
 
 ### Verify Manually
 
 ```bash
-# Health check (no auth required)
-curl http://localhost:7654/health
+# Health check (agent only listens on localhost)
+curl http://127.0.0.1:7654/health
 
-# Full stats (auth required)
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:7654/stats
+# Full stats (no auth needed — localhost only)
+curl http://127.0.0.1:7654/stats
 ```
 
 ---
@@ -133,13 +133,13 @@ Once running, the macOS app shows live stats for each server:
 - **Uptime** — Time since last boot
 - **Docker containers** — Per-container CPU, memory, network, block I/O, PIDs, status
 
-The agent streams live updates via Server-Sent Events (SSE): system stats every 1s, Docker every 5s, services every 10s.
+The agent streams live updates via Server-Sent Events (SSE): system stats every 1s, Docker every 5s.
 
 ---
 
 ## API Endpoints
 
-All endpoints except `/health` require `Authorization: Bearer <token>`.
+The agent binds to `127.0.0.1` only. No authentication is needed — the SSH tunnel handles security.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -148,8 +148,7 @@ All endpoints except `/health` require `Authorization: Bearer <token>`.
 | `GET` | `/stats/system` | System stats only (no Docker overhead) |
 | `GET` | `/stats/docker` | Docker container stats only |
 | `GET` | `/stats/processes` | Top processes by CPU |
-| `GET` | `/stats/services` | Detected service stats (Pi-hole, Traefik, etc.) |
-| `GET` | `/stats/stream` | **SSE stream** — live updates (system 1s, docker 5s, services 10s) |
+| `GET` | `/stats/stream` | **SSE stream** — live updates (system 1s, docker 5s) |
 | `POST` | `/containers/{id}/start` | Start a Docker container |
 | `POST` | `/containers/{id}/stop` | Stop a Docker container |
 | `POST` | `/containers/{id}/restart` | Restart a Docker container |
@@ -168,7 +167,7 @@ Config is auto-generated during install at `/etc/deskmon/config.yaml`:
 
 ```yaml
 port: 7654
-auth_token: "your-generated-token"
+bind: "127.0.0.1"
 ```
 
 To change settings, edit the file and restart:
@@ -192,7 +191,7 @@ git pull
 sudo make setup
 ```
 
-Rebuilds the binary, replaces it, restarts the service. Your existing config and auth token are preserved.
+Rebuilds the binary, replaces it, restarts the service. Your existing config is preserved.
 
 ### Uninstall
 
@@ -234,27 +233,18 @@ The agent auto-recovers from crashes (systemd `Restart=always`) and starts autom
 
 The agent is hardened as a read-only stats reporter:
 
-- **Auth token** — Auto-generated 32-char token, constant-time comparison to prevent timing attacks
-- **Rate limiting** — 60 requests/minute per IP to prevent brute-force
+- **Localhost only** — Binds to `127.0.0.1`, not reachable from the network. The macOS app connects via SSH tunnel.
+- **SSH authentication** — The macOS app authenticates via SSH (password on first connect, then auto-generated ed25519 key). No API tokens.
+- **Rate limiting** — 60 requests/minute per IP as secondary defense
 - **No injection surface** — Zero user input reaches shell commands, file paths, or system calls. Control endpoints execute hardcoded `systemctl` commands only.
 - **Read-only** — Only reads from `/proc`, `/sys`, and Docker socket. No filesystem writes. Docker client is read-only (list and stats only).
 - **No outbound connections** — No phoning home, no telemetry, no update checks
 - **Systemd sandboxing** — `ProtectSystem=strict`, `ReadOnlyPaths=/`, `ProtectHome=yes`, `NoNewPrivileges=yes`
 - **Config permissions** — `/etc/deskmon/` is root-only (0700), config file is 0600
 
-### Firewall
+### No Firewall Needed
 
-Open only the agent port:
-
-```bash
-sudo ufw allow 7654/tcp
-```
-
-For extra security, restrict to your Mac's IP:
-
-```bash
-sudo ufw allow from 192.168.1.50 to any port 7654
-```
+The agent only listens on `127.0.0.1:7654`. It is not accessible from the network. The macOS app reaches it through an SSH tunnel, so you only need SSH access (port 22) to your server — no additional firewall rules required.
 
 ---
 
@@ -287,7 +277,7 @@ deskmon-agent/
 │   └── main.go              # Entry point, graceful shutdown
 ├── internal/
 │   ├── api/
-│   │   ├── server.go        # HTTP server, auth, rate limiting
+│   │   ├── server.go        # HTTP server, rate limiting
 │   │   ├── handlers.go      # /health, /stats handlers
 │   │   ├── stream.go        # SSE streaming endpoint
 │   │   ├── control.go       # /agent/* control handlers
@@ -297,14 +287,7 @@ deskmon-agent/
 │   ├── collector/
 │   │   ├── system.go        # CPU, memory, disk, network, temp, uptime
 │   │   ├── docker.go        # Container stats via Docker SDK
-│   │   ├── broadcast.go     # Generic pub/sub broadcaster for SSE
-│   │   └── services/        # Auto-detected service plugins
-│   │       ├── detector.go  # Background detection + collection
-│   │       ├── registry.go  # Plugin registry
-│   │       ├── helpers.go   # Detection env, HTTP probing
-│   │       ├── pihole.go    # Pi-hole v5/v6 plugin
-│   │       ├── traefik.go   # Traefik plugin
-│   │       └── nginx.go     # Nginx plugin
+│   │   └── broadcast.go     # Generic pub/sub broadcaster for SSE
 │   ├── config/
 │   │   ├── config.go        # YAML config loader
 │   │   └── config_test.go   # Config tests
@@ -340,11 +323,6 @@ ss -tlnp | grep 7654
 **Temperature showing 0**
 - Some VMs and cloud servers don't expose thermal zones
 - Agent returns `0` gracefully per the API contract
-
-**Forgot auth token**
-```bash
-sudo cat /etc/deskmon/config.yaml
-```
 
 ---
 

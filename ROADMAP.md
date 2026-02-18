@@ -11,11 +11,9 @@ Current state: **MVP** -- core system stats, Docker monitoring, service detectio
 - Container management: start, stop, restart from macOS app
 - Process monitoring: top 10 by CPU with EMA smoothing
 - Process control: kill by PID
-- Service auto-detection: Pi-hole (v5/v6), Traefik, Nginx
-- Service configuration: set credentials via API (persisted to config)
-- SSE streaming: system (1s), Docker (5s), services (10s)
+- SSE streaming: system (1s), Docker (5s)
 - Agent control: restart/stop via systemd from macOS app
-- Bearer token auth with constant-time comparison
+- Localhost-only binding (127.0.0.1) — SSH tunnel handles auth
 - Rate limiting (60 req/min per IP)
 - Security hardening: systemd sandboxing, read-only filesystem, no shell injection surface
 - One-command install: `sudo make setup`
@@ -37,7 +35,6 @@ Current state: **MVP** -- core system stats, Docker monitoring, service detectio
 
 ## Medium Term
 
-- **Service plugins** -- Add detection for more self-hosted services: Plex, Home Assistant, Nextcloud, Jellyfin, Portainer, Grafana, Prometheus.
 - **Custom alert thresholds** -- Configurable CPU/memory/disk thresholds that trigger push notifications on the macOS app.
 - **Historical data** -- Keep last-hour sparkline data in memory for the macOS app to render trends.
 - **mDNS/Bonjour discovery** -- Auto-discover agents on the local network so users don't have to enter IPs manually.
@@ -49,7 +46,6 @@ Current state: **MVP** -- core system stats, Docker monitoring, service detectio
 ## Long Term
 
 - **Tailscale integration** -- Detect Tailscale, report tailnet status, advertise Tailscale IP alongside LAN IP.
-- **Multi-user auth** -- Support multiple tokens with different permission levels (read-only vs full control).
 - **TLS support** -- Optional HTTPS with self-signed or user-provided certificates.
 - **Update mechanism** -- Agent self-update from GitHub releases.
 - **Webhook notifications** -- Push alerts to Slack, Discord, or generic webhooks when thresholds are crossed.

@@ -3,58 +3,45 @@
 What the macOS app expects from `deskmon-agent`. This is the source of truth for the JSON shapes the Swift client will decode.
 
 **Default port:** `7654`
-**Auth:** `Authorization: Bearer <token>` header (required on all endpoints except `/health`)
+**Bind:** `127.0.0.1` (localhost only)
+**Auth:** None — the agent is only reachable via SSH tunnel. The macOS app handles SSH authentication.
 
 ---
 
 ## Endpoints
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/health` | No | Reachability check |
-| `GET` | `/stats` | Yes | Full system + container stats |
-| `GET` | `/stats/system` | Yes | System stats only |
-| `GET` | `/stats/docker` | Yes | Docker container stats only |
-| `GET` | `/stats/processes` | Yes | Top processes by CPU |
-| `GET` | `/stats/services` | Yes | Detected service stats |
-| `GET` | `/stats/services/debug` | Yes | Service detection diagnostics |
-| `GET` | `/stats/stream` | Yes | SSE stream of live stats |
-| `POST` | `/containers/{id}/start` | Yes | Start a Docker container |
-| `POST` | `/containers/{id}/stop` | Yes | Stop a Docker container |
-| `POST` | `/containers/{id}/restart` | Yes | Restart a Docker container |
-| `POST` | `/processes/{pid}/kill` | Yes | Kill a process by PID |
-| `POST` | `/services/{pluginId}/configure` | Yes | Set service credentials (e.g. Pi-hole password) |
-| `POST` | `/agent/restart` | Yes | Restart agent via systemd |
-| `POST` | `/agent/stop` | Yes | Stop agent via systemd |
-| `GET` | `/agent/status` | Yes | Agent version and service state |
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Reachability check |
+| `GET` | `/stats` | Full system + container stats |
+| `GET` | `/stats/system` | System stats only |
+| `GET` | `/stats/docker` | Docker container stats only |
+| `GET` | `/stats/processes` | Top processes by CPU |
+| `GET` | `/stats/stream` | SSE stream of live stats |
+| `POST` | `/containers/{id}/start` | Start a Docker container |
+| `POST` | `/containers/{id}/stop` | Stop a Docker container |
+| `POST` | `/containers/{id}/restart` | Restart a Docker container |
+| `POST` | `/processes/{pid}/kill` | Kill a process by PID |
+| `POST` | `/agent/restart` | Restart agent via systemd |
+| `POST` | `/agent/stop` | Stop agent via systemd |
+| `GET` | `/agent/status` | Agent version and service state |
 
 ---
 
-## Auth Handshake Flow
+## Connection Flow
 
-The macOS app uses a two-step verification when connecting to a server:
+The macOS app connects to the agent via SSH tunnel:
 
 ```
-Step 1: GET /health  (no auth)
-        ├─ No response / timeout → server.status = .offline
-        └─ 200 OK → server is reachable, proceed to step 2
-
-Step 2: GET /stats   (Bearer token)
-        ├─ 401 Unauthorized → server.status = .unauthorized
-        └─ 200 OK → server.status = .healthy (connection verified)
+Step 1: SSH connect to server (password or ed25519 key)
+Step 2: Open SSH tunnel → localhost:7654 on the server
+Step 3: GET /stats via tunnel to verify agent is running
+Step 4: Open GET /stats/stream for live updates
 ```
 
-This handshake runs:
-- **AddServerSheet** — "Connect" button runs handshake before saving. Token is required.
-- **EditServerSheet** — Re-verifies only if host/port/token changed. Name-only edits skip.
-- **DashboardView inline edit** — Same pattern via `testAndSaveEdit()`.
-- **SSE stream** — On connect/reconnect, the app does a full `GET /stats` fetch, then opens `GET /stats/stream` for live updates. 401 sets `.unauthorized`, unreachable sets `.offline`.
+The agent binds to `127.0.0.1` only and requires no API authentication. SSH handles all security. On first connect, the app authenticates with SSH password, then auto-generates an ed25519 key and installs it on the server for subsequent connections.
 
-### Agent Requirements
-
-- `/health` must **never** require auth — the app uses it to distinguish "offline" from "unauthorized"
-- `/stats` must return exactly `401` (not 403, not 200 with error body) when the token is wrong
-- 401 response should have an empty body — the app only checks the HTTP status code
+On disconnect, the app reconnects with exponential backoff (2s → 4s → 8s → max 30s).
 
 ---
 
@@ -133,20 +120,6 @@ Full system stats and Docker container stats in a single response.
       "user": "www-data"
     }
   ],
-  "services": [
-    {
-      "pluginId": "pihole",
-      "name": "Pi-hole",
-      "icon": "shield.checkerboard",
-      "status": "running",
-      "summary": [
-        { "label": "Queries Today", "value": "45,231", "type": "number" },
-        { "label": "Blocked", "value": "12.5%", "type": "percent" }
-      ],
-      "stats": { "dns_queries_today": 45231, "ads_blocked_today": 5654 },
-      "url": "http://192.168.1.50:80"
-    }
-  ]
 }
 ```
 
@@ -154,7 +127,6 @@ Full system stats and Docker container stats in a single response.
 
 | Status | Meaning |
 |--------|---------|
-| `401 Unauthorized` | Missing or invalid Bearer token (empty body) |
 | `429 Too Many Requests` | Rate limit exceeded (60/min per IP) |
 
 If Docker is not installed or the socket is unavailable, `containers` is an empty array `[]`.
@@ -206,76 +178,6 @@ Top 10 processes sorted by CPU usage. CPU values are EMA-smoothed (alpha=0.3) fo
 | `memoryPercent` | `float64` | Memory as percentage of total RAM |
 | `command` | `string` | Full command line. Omitted if empty |
 | `user` | `string` | Process owner username. Omitted if unresolvable |
-
----
-
-## GET /stats/services
-
-Auto-detected service stats. Returns an empty array if no supported services are found.
-
-Currently supported: **Pi-hole** (v5 and v6), **Traefik**, **Nginx**.
-
-**Response** `200 OK`
-
-```json
-[
-  {
-    "pluginId": "pihole",
-    "name": "Pi-hole",
-    "icon": "shield.checkerboard",
-    "status": "running",
-    "summary": [
-      { "label": "Queries Today", "value": "45,231", "type": "number" },
-      { "label": "Blocked", "value": "12.5%", "type": "percent" },
-      { "label": "Status", "value": "enabled", "type": "status" }
-    ],
-    "stats": {
-      "dns_queries_today": 45231,
-      "ads_blocked_today": 5654,
-      "ads_percentage_today": 12.5,
-      "domains_being_blocked": 120456,
-      "status": "enabled"
-    },
-    "url": "http://192.168.1.50:80"
-  }
-]
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `pluginId` | `string` | Unique plugin identifier (`pihole`, `traefik`, `nginx`) |
-| `name` | `string` | Human-readable name |
-| `icon` | `string` | SF Symbol name for macOS app rendering |
-| `status` | `string` | `running`, `stopped`, or `error` |
-| `summary` | `array` | Key-value metrics for the service card UI |
-| `summary[].type` | `string` | `number`, `percent`, `status`, or `text` |
-| `stats` | `object` | Raw stats from the service API. Structure varies per plugin |
-| `error` | `string` | Error message if `status` is `error`. Omitted otherwise |
-| `url` | `string` | Base URL of the detected service. Omitted if unavailable |
-
----
-
-## GET /stats/services/debug
-
-Diagnostic info for service detection. Useful for troubleshooting why a service is or isn't detected.
-
-**Response** `200 OK`
-
-```json
-{
-  "registeredPlugins": ["pihole", "traefik", "nginx"],
-  "detected": {
-    "pihole": {
-      "pluginID": "pihole",
-      "name": "Pi-hole",
-      "baseURL": "http://192.168.1.50:80",
-      "version": "v6"
-    }
-  },
-  "dockerSocket": "/var/run/docker.sock",
-  "dockerAvailable": true
-}
-```
 
 ---
 
@@ -410,8 +312,7 @@ The macOS app determines server status from the connection state and stats respo
 
 | Condition | Status | Icon |
 |-----------|--------|------|
-| No response / timeout | `.offline` | — |
-| `/health` OK but `/stats` returns 401 | `.unauthorized` | Lock, orange |
+| SSH tunnel down / no response | `.offline` | — |
 | CPU > 90% OR Memory > 95% | `.critical` | Red |
 | CPU > 75% OR Memory > 85% | `.warning` | Yellow |
 | Otherwise | `.healthy` | Green |
@@ -424,8 +325,8 @@ The agent does not send a status field. The app computes it.
 
 | Scenario | Agent Response | App Behavior |
 |----------|---------------|-------------|
-| Agent unreachable | No response | `.offline` |
-| Wrong/missing Bearer token | `401` (empty body) | `.unauthorized` |
+| SSH tunnel down | No response | `.offline` |
+| Agent not running | No response on tunnel | `.offline` |
 | Rate limit exceeded | `429` | Retries after backoff |
 | Docker not installed | `containers: []` | Shows empty container list |
 | Docker socket denied | `containers: []` | Shows empty container list |
@@ -439,8 +340,6 @@ The agent does not send a status field. The app computes it.
 Server-Sent Events endpoint for live stats. The macOS app opens a persistent connection and receives events as they're produced by the agent's background collectors.
 
 **Headers:** `Content-Type: text/event-stream`
-
-**Auth:** Same `Authorization: Bearer <token>` header as other endpoints.
 
 ### Event Types
 
@@ -458,13 +357,6 @@ event: docker
 data: [{"id":"a1b2c3","name":"pihole","status":"running",...},...]
 ```
 
-**`services`** — Fires every **10 seconds**. Contains detected service stats.
-
-```
-event: services
-data: [{"pluginId":"pihole","name":"Pi-hole","status":"running",...},...]
-```
-
 **Keepalive** — Comment line every **15 seconds** to prevent proxy timeouts.
 
 ```
@@ -473,11 +365,10 @@ data: [{"pluginId":"pihole","name":"Pi-hole","status":"running",...},...]
 
 ### Connection Lifecycle
 
-1. App opens `GET /stats/stream` with Bearer auth
-2. Agent validates token (401 if invalid)
-3. Agent holds connection open, streams events
-4. On disconnect (network, proxy timeout, agent restart), app reconnects with exponential backoff (2s → 4s → 8s → max 30s)
-5. On reconnect, app does a full `GET /stats` fetch first to fill UI, then reopens the stream
+1. App opens `GET /stats/stream` via SSH tunnel
+2. Agent holds connection open, streams events
+3. On disconnect (SSH drop, agent restart), app reconnects with exponential backoff (2s → 4s → 8s → max 30s)
+4. On reconnect, app does a full `GET /stats` fetch first to fill UI, then reopens the stream
 
 ### Proxy Compatibility
 
@@ -516,49 +407,4 @@ Kill a process by PID (sends SIGTERM).
 
 ---
 
-## POST /services/{pluginId}/configure
-
-Configure credentials for a detected service. Currently used for Pi-hole v6 password authentication.
-
-**Request** `POST /services/pihole/configure`
-
-```json
-{
-  "password": "your-pihole-password"
-}
-```
-
-**Response** `200 OK`
-
-```json
-{
-  "message": "configured"
-}
-```
-
-The agent stores the password in its config file (`/etc/deskmon/config.yaml`) and uses it to authenticate with the Pi-hole v6 API on the next collection cycle. The password persists across agent restarts.
-
-### Pi-hole v6 Authentication Flow
-
-Pi-hole v6 requires session-based authentication for detailed stats:
-
-1. Agent sends `POST /api/auth` to Pi-hole with the password
-2. Pi-hole returns a session ID (SID) valid for ~5 minutes
-3. Agent uses `X-FTL-SID` header on subsequent API requests
-4. Sessions auto-renew on each successful request
-5. On session expiry (401), agent re-authenticates automatically
-
-If no password is configured, the agent returns `authRequired: true` in the Pi-hole service stats, and the macOS app shows a password prompt.
-
-### Agent Config
-
-Pi-hole password can also be set directly in `/etc/deskmon/config.yaml`:
-
-```yaml
-port: 7654
-auth_token: "your-agent-token"
-services:
-  pihole:
-    password: "your-pihole-password"
-```
 
