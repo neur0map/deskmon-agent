@@ -195,6 +195,14 @@ Restart the agent via systemd. The agent responds before restarting.
 
 The agent process dies and systemd brings it back (~5 seconds). The macOS app will see a brief offline status, then `/health` returns and the green dot comes back.
 
+**Docker mode:** Returns `400 Bad Request` with an error message. Systemctl is not available inside a container.
+
+```json
+{
+  "error": "agent control not available in Docker mode — use docker restart instead"
+}
+```
+
 ---
 
 ## POST /agent/stop
@@ -211,6 +219,8 @@ Stop the agent via systemd. The agent responds before stopping.
 
 After stopping, the agent is unreachable. The macOS app will show `.offline`.
 
+**Docker mode:** Returns `400 Bad Request` with the same error as `/agent/restart`.
+
 ---
 
 ## GET /agent/status
@@ -223,6 +233,8 @@ After stopping, the agent is unreachable. The macOS app will show `.offline`.
   "status": "active"
 }
 ```
+
+**Docker mode:** Returns `"running (docker)"` as the status value.
 
 ---
 
@@ -260,6 +272,8 @@ The agent computes bytes-per-second by sampling `/proc/net/dev` at 1-second inte
 ### Temperature
 
 Read from `/sys/class/thermal/thermal_zone*/temp`. Returns the highest value across all zones. Divided by 1000 (kernel reports millidegrees). Returns `0` if not available.
+
+In Docker mode, reads from `$DESKMON_HOST_SYS/class/thermal/thermal_zone*/temp` (typically `/host/sys/...`) to access host thermal zones instead of the container's isolated sysfs.
 
 ---
 

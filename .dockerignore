@@ -1,0 +1,15 @@
+.git
+.gitignore
+bin/
+dist/
+*.md
+LICENSE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+coverage.out
+coverage.html
+config.yaml
+*.local.yaml

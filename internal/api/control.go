@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -17,31 +18,37 @@ type controlResponse struct {
 }
 
 func (s *Server) handleAgentRestart(w http.ResponseWriter, r *http.Request) {
+	if err := systemctl.Restart(); err != nil {
+		if errors.Is(err, systemctl.ErrDockerMode) {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
 	// Respond before restarting so the client gets a response
 	writeJSON(w, controlResponse{Message: "restarting"})
 
-	// Flush the response
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-
-	// Restart asynchronously — the process will die and systemd will bring it back
-	go func() {
-		_ = systemctl.Restart()
-	}()
 }
 
 func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
+	if err := systemctl.Stop(); err != nil {
+		if errors.Is(err, systemctl.ErrDockerMode) {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
 	// Respond before stopping so the client gets a response
 	writeJSON(w, controlResponse{Message: "stopping"})
 
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-
-	go func() {
-		_ = systemctl.Stop()
-	}()
 }
 
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {

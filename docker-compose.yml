@@ -1,0 +1,17 @@
+services:
+  deskmon-agent:
+    build: .
+    image: ghcr.io/neur0map/deskmon-agent:latest
+    container_name: deskmon-agent
+    pid: host
+    network_mode: host
+    privileged: false
+    volumes:
+      - /:/hostfs:ro,rslave
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/deskmon:/etc/deskmon
+    environment:
+      - DESKMON_HOST_ROOT=/hostfs
+      - DESKMON_HOST_SYS=/host/sys
+    restart: unless-stopped

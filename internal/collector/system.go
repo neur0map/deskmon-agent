@@ -685,7 +685,15 @@ var pseudoFS = map[string]bool{
 }
 
 func readDisks() []DiskInfo {
-	f, err := os.Open("/proc/mounts")
+	// In Docker mode, /proc/mounts shows container mounts.
+	// Read /proc/1/mounts instead (PID 1 = host init, its mounts = host mounts).
+	hostRoot := os.Getenv("DESKMON_HOST_ROOT")
+	mountsPath := "/proc/mounts"
+	if hostRoot != "" {
+		mountsPath = "/proc/1/mounts"
+	}
+
+	f, err := os.Open(mountsPath)
 	if err != nil {
 		return nil
 	}
@@ -718,8 +726,15 @@ func readDisks() []DiskInfo {
 		}
 		seenDevices[device] = true
 
+		// In Docker mode, prefix mount points with host root for statfs calls.
+		// Report the original mount point name in the API response.
+		statfsPath := mountPoint
+		if hostRoot != "" {
+			statfsPath = hostRoot + mountPoint
+		}
+
 		var stat syscall.Statfs_t
-		if err := syscall.Statfs(mountPoint, &stat); err != nil {
+		if err := syscall.Statfs(statfsPath, &stat); err != nil {
 			continue
 		}
 
@@ -751,7 +766,11 @@ func readDisks() []DiskInfo {
 }
 
 func readTemperature() (float64, bool) {
-	matches, err := filepath.Glob("/sys/class/thermal/thermal_zone*/temp")
+	sysPath := os.Getenv("DESKMON_HOST_SYS")
+	if sysPath == "" {
+		sysPath = "/sys"
+	}
+	matches, err := filepath.Glob(filepath.Join(sysPath, "class/thermal/thermal_zone*/temp"))
 	if err != nil || len(matches) == 0 {
 		return 0, false
 	}

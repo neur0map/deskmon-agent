@@ -18,6 +18,9 @@ Current state: **MVP** -- core system stats, Docker monitoring, service detectio
 - Security hardening: systemd sandboxing, read-only filesystem, no shell injection surface
 - One-command install: `sudo make setup`
 - Cross-compilation for Linux amd64 and arm64
+- Docker support with host namespace access (unRAID, TrueNAS, any Linux with Docker)
+- GitHub Actions release workflow (prebuilt binaries + multi-arch Docker image)
+- Curl-based remote installer (`install-remote.sh`)
 
 ---
 
