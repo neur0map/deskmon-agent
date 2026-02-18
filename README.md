@@ -6,7 +6,7 @@ Single binary. One-command install. Set it and forget it.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
-![Go](https://img.shields.io/badge/Go-1.22+-00ADD8)
+![Go](https://img.shields.io/badge/Go-1.25+-00ADD8)
 
 ---
 
@@ -50,7 +50,7 @@ Three ways to install. Pick the one that matches your server.
 |--------|----------|-------------|
 | [Docker](#option-a-docker) | **unRAID**, TrueNAS, any server with Docker | Docker installed |
 | [Prebuilt binary](#option-b-prebuilt-binary) | Ubuntu, Debian, Fedora, Arch | Terminal access + sudo |
-| [Build from source](#option-c-build-from-source) | Developers, custom builds | Go 1.22+ and git |
+| [Build from source](#option-c-build-from-source) | Developers, custom builds | Go 1.25+ and git |
 
 ---
 
@@ -162,7 +162,7 @@ curl -fsSL https://raw.githubusercontent.com/neur0map/deskmon-agent/main/scripts
 
 ### Option C: Build from source
 
-Requires Go 1.22+ and git installed on the server.
+Requires Go 1.25+ and git installed on the server.
 
 ```bash
 git clone https://github.com/neur0map/deskmon-agent.git
