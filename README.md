@@ -324,18 +324,19 @@ docker stop deskmon-agent
 docker rm deskmon-agent
 ```
 
-**Systemd:**
+**Prebuilt binary (one-liner uninstall):**
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/neur0map/deskmon-agent/main/scripts/install.sh | sudo bash -s -- --uninstall
+```
+
+This stops the service, removes the binary, config, and systemd unit file.
+
+**Built from source:**
+
+```bash
+cd deskmon-agent
 sudo make uninstall
-# or if you used the prebuilt binary:
-sudo /usr/local/bin/deskmon-agent --help   # check it exists
-sudo systemctl stop deskmon-agent
-sudo systemctl disable deskmon-agent
-sudo rm /etc/systemd/system/deskmon-agent.service
-sudo rm /usr/local/bin/deskmon-agent
-sudo rm -rf /etc/deskmon
-sudo systemctl daemon-reload
 ```
 
 ---
